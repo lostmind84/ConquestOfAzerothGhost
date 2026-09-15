@@ -2,7 +2,9 @@
 
 Fork of https://github.com/azerothcore/AzerothGhost to support `Conquest of AzerothCore` custom classes and features.
 
-Currently just has a tiny subset of Time Chronomancer done, but planning to cover all of the Time spec, then move onto the other specs and classes.
+The primary goal is to support E2E testing so that regressions to classes, talents and features can be caught as early as possible.
+
+Currently just has a tiny subset of Time Chronomancer done (see `e2e/classes/chronomancer`), but the plan is to cover all of the Time spec, then move onto as many other specs and classes as my hyperfocus allows.
 
 ## Usage:
 
