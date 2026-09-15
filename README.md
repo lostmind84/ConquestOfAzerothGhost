@@ -35,6 +35,23 @@ set -a; . ./.env; set +a
 go test -tags=e2e ./e2e/classes/chronomancer/time -run TestChronomancer -count=1 -v
 ```
 
+### Tests that change server settings
+
+Some tests (for example `e2e/coa/xprates`, which checks that `Rate.XP.Kill` and
+`Rate.XP.Quest` scale experience) edit the live `worldserver.conf`, apply it with
+`.reload config`, and restore the original file when the test ends. They affect
+every player on that server and are skipped unless `E2E_WORLDSERVER_CONF` points at
+the file the worldserver reads (for a Docker install, the host side of the `etc`
+bind mount):
+
+```bash
+E2E_WORLDSERVER_CONF='/path/to/etc/worldserver.conf' \
+  go test -tags=e2e ./e2e/coa/xprates -count=1 -v
+```
+
+Only settings that `World::LoadConfigSettings` re-reads on reload can be tested this
+way. If the test process is killed, restore the file and run `.reload config` yourself.
+
 ## Example Output:
 
 ```
