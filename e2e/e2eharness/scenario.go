@@ -203,12 +203,21 @@ type ScenarioOpts struct {
 	StartPad *Position3
 }
 
+// MaxBotPrefixLen is the longest scenario prefix whose generated account names
+// (prefix + 2-digit index + up to 8 hex digits) authserver still accepts.
+const MaxBotPrefixLen = 7
+
 // NewScenario opens DBs, creates accounts, logs bots in, and applies setup.
 // Sessions and DBs are closed via t.Cleanup.
 func NewScenario(t *testing.T, opt ScenarioOpts) []*ScenarioBot {
 	t.Helper()
 	if opt.Prefix == "" {
 		opt.Prefix = "Sc"
+	}
+	// Accounts are prefix + 2-digit index + up to 8 hex digits. Longer names make
+	// the logon challenge too large and authserver drops the connection (EOF).
+	if len(opt.Prefix) > MaxBotPrefixLen {
+		Preconditionf(t, "scenario prefix %q is longer than %d characters", opt.Prefix, MaxBotPrefixLen)
 	}
 	enableGM := !opt.SkipGM
 
