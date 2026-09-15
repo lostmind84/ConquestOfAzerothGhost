@@ -15,6 +15,31 @@ func (b *ScenarioBot) PlayerMoney() uint32 {
 	return b.World.Money()
 }
 
+// PlayerXP returns live experience within the current level from PLAYER_XP.
+func (b *ScenarioBot) PlayerXP() uint32 {
+	return b.World.XP()
+}
+
+// WaitXPGain waits until PLAYER_XP rises above before and returns the gain.
+// PLAYER_XP resets on level-up, so a level change is a precondition failure:
+// keep rewards below PLAYER_NEXT_LEVEL_XP when measuring.
+func (b *ScenarioBot) WaitXPGain(t *testing.T, before uint32, timeout time.Duration) uint32 {
+	t.Helper()
+	level := b.World.PlayerLevel()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if now := b.World.PlayerLevel(); now != level {
+			Preconditionf(t, "level changed %d -> %d while measuring XP", level, now)
+		}
+		if xp := b.World.XP(); xp > before {
+			return xp - before
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	HarnessFailf(t, "no XP gain within %v (PLAYER_XP still %d)", timeout, b.World.XP())
+	return 0
+}
+
 // MoneyAfterSave flushes character and returns characters.money for this bot.
 // Polls CharDB briefly — `.save` is async and a single immediate SELECT often races to 0.
 func (b *ScenarioBot) MoneyAfterSave(t *testing.T) uint32 {

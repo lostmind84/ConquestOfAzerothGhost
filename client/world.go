@@ -343,6 +343,10 @@ const (
 	// UNIT_END = OBJECT_END + 0x008E = 0x94 (3.3.5a)
 	// PLAYER_FIELD_COINAGE = UNIT_END + 0x03FE
 	PlayerFieldCoinage = 0x0492
+	// PLAYER_XP = UNIT_END + 0x01E6 (experience within the current level)
+	PlayerXP = 0x027A
+	// PLAYER_NEXT_LEVEL_XP = UNIT_END + 0x01E7
+	PlayerNextLevelXP = 0x027B
 
 	// PLAYER_VISIBLE_ITEM_1_ENTRYID = UNIT_END + 0x0087. Each paper-doll slot
 	// is entry + enchantment (stride 2). Slot 0 = head … slot 18 = tabard.
@@ -3081,6 +3085,25 @@ func (w *WorldClient) SelfAuraStacks(spellID uint32) int {
 		return 0
 	}
 	return obj.AuraStacks(spellID)
+}
+
+// XP returns PLAYER_XP on the player: experience within the current level
+// (0 until the first self update; resets on level-up).
+func (w *WorldClient) XP() uint32 {
+	obj := w.GetObject(w.CharGUID())
+	if obj == nil {
+		return 0
+	}
+	return obj.Value(PlayerXP)
+}
+
+// NextLevelXP returns PLAYER_NEXT_LEVEL_XP on the player (0 until the first self update).
+func (w *WorldClient) NextLevelXP() uint32 {
+	obj := w.GetObject(w.CharGUID())
+	if obj == nil {
+		return 0
+	}
+	return obj.Value(PlayerNextLevelXP)
 }
 
 // ChannelSpell returns UNIT_CHANNEL_SPELL on the player (0 if not channeling).
