@@ -130,6 +130,12 @@ func (b *ScenarioBot) WaitUnitAny(t *testing.T, timeout time.Duration, entries .
 	return g
 }
 
+// WaitAura waits until the player has spellID; fatals on timeout.
+func (b *ScenarioBot) WaitAura(t *testing.T, spellID uint32, timeout time.Duration) {
+	t.Helper()
+	WaitAura(t, b.World, spellID, timeout)
+}
+
 // WaitAuraGone waits until the player loses spellID; fatals on timeout.
 func (b *ScenarioBot) WaitAuraGone(t *testing.T, spellID uint32, timeout time.Duration) {
 	t.Helper()
@@ -540,6 +546,18 @@ func (b *ScenarioBot) TryCast(t *testing.T, spellID uint32, targetGUID uint64, t
 	return b.WaitSpellID(spellID, timeout)
 }
 
+// CastAndMeasure casts spellID at targetGUID and returns the result and measured elapsed duration.
+func (b *ScenarioBot) CastAndMeasure(t *testing.T, spellID uint32, targetGUID uint64, timeout time.Duration) (SpellCastResult, time.Duration) {
+	t.Helper()
+	return CastAndMeasure(t, b.Session, spellID, targetGUID, timeout)
+}
+
+// AssertCastDuration casts spellID and fails if the cast fails or duration is not within expected +/- tolerance.
+func (b *ScenarioBot) AssertCastDuration(t *testing.T, spellID uint32, targetGUID uint64, expected time.Duration, tolerance time.Duration) time.Duration {
+	t.Helper()
+	return AssertCastDuration(t, b.Session, spellID, targetGUID, expected, tolerance)
+}
+
 // CastMust fails unless the cast succeeds (SMSG_SPELL_GO).
 func (b *ScenarioBot) CastMust(t *testing.T, spellID uint32, targetGUID uint64, timeout time.Duration) {
 	t.Helper()
@@ -562,6 +580,16 @@ func (b *ScenarioBot) Learn(t *testing.T, spellID uint32) {
 func (b *ScenarioBot) LearnAll(t *testing.T) {
 	t.Helper()
 	LearnAllMyClass(t, b.World)
+}
+
+// SpellLearnedCount returns how many times SMSG_LEARNED_SPELL was received for this spell ID.
+func (b *ScenarioBot) SpellLearnedCount(spellID uint32) int {
+	return b.World.SpellLearnedCount(spellID)
+}
+
+// SpellbookCount returns the total number of times the spell was granted (initial + learned).
+func (b *ScenarioBot) SpellbookCount(spellID uint32) int {
+	return b.World.SpellbookCount(spellID)
 }
 
 // AddQuest adds a quest via GM and waits until character_queststatus is INCOMPLETE.

@@ -415,6 +415,44 @@ func (w *WorldClient) invokeSpellCastResultHooks(spellID uint32, success bool, f
 	}
 }
 
+type spellStartHook struct {
+	id HookID
+	fn func(spellID uint32, castTimeMs uint32)
+}
+
+func (w *WorldClient) AddSpellStartHook(fn func(spellID uint32, castTimeMs uint32)) (cancel func()) {
+	if fn == nil {
+		return func() {}
+	}
+	w.cbMu.Lock()
+	id := w.nextHookID()
+	w.spellStartHooks = append(w.spellStartHooks, spellStartHook{id: id, fn: fn})
+	w.cbMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			w.cbMu.Lock()
+			out := w.spellStartHooks[:0]
+			for _, h := range w.spellStartHooks {
+				if h.id != id {
+					out = append(out, h)
+				}
+			}
+			w.spellStartHooks = out
+			w.cbMu.Unlock()
+		})
+	}
+}
+
+func (w *WorldClient) invokeSpellStartHooks(spellID uint32, castTimeMs uint32) {
+	w.cbMu.RLock()
+	hooks := append([]spellStartHook(nil), w.spellStartHooks...)
+	w.cbMu.RUnlock()
+	for _, h := range hooks {
+		h.fn(spellID, castTimeMs)
+	}
+}
+
 // --- Group invite / list ---
 
 func (w *WorldClient) AddGroupInviteHook(fn func(inviterName string, alreadyInGroup bool)) (cancel func()) {

@@ -268,7 +268,7 @@ func (o *Orchestrator) ensureAccount(username, password string) error {
 	err := o.authDB.QueryRow("SELECT id FROM account WHERE username = ?", usernameUpper).Scan(&id)
 	if err == sql.ErrNoRows {
 		_, err = o.authDB.Exec(
-			`INSERT INTO account (username, salt, verifier, expansion) VALUES (?, ?, ?, 2)`,
+			`INSERT INTO account (username, salt, verifier, expansion, os) VALUES (?, ?, ?, 2, 'Win')`,
 			usernameUpper, salt, verifier,
 		)
 		if err != nil {
@@ -279,7 +279,7 @@ func (o *Orchestrator) ensureAccount(username, password string) error {
 		return err
 	} else {
 		_, err = o.authDB.Exec(
-			`UPDATE account SET salt = ?, verifier = ? WHERE username = ?`,
+			`UPDATE account SET salt = ?, verifier = ?, os = 'Win' WHERE username = ?`,
 			salt, verifier, usernameUpper,
 		)
 		if err != nil {

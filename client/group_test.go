@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"testing"
+	"time"
 )
 
 func TestParseGroupList_EmptyDestroyed(t *testing.T) {
@@ -84,16 +85,25 @@ func TestMakePetActionButton_Abandon(t *testing.T) {
 
 func TestAuraStacks_FromSlotUpdate(t *testing.T) {
 	obj := &WorldObject{Values: map[uint16]uint32{}}
-	obj.setAuraForSlot(1, 12345, 3)
+	obj.setAuraForSlot(1, 12345, 3, 15000, 14900)
 	if !obj.HasAura(12345) {
 		t.Fatal("missing aura")
 	}
 	if obj.AuraStacks(12345) != 3 {
 		t.Fatalf("stacks=%d", obj.AuraStacks(12345))
 	}
-	obj.setAuraForSlot(1, 0, 0)
+	if dur := obj.AuraDuration(12345); dur != 14900*time.Millisecond {
+		t.Fatalf("expected duration 14.9s, got %v", dur)
+	}
+	if maxDur := obj.AuraMaxDuration(12345); maxDur != 15000*time.Millisecond {
+		t.Fatalf("expected maxDuration 15s, got %v", maxDur)
+	}
+	obj.setAuraForSlot(1, 0, 0, 0, 0)
 	if obj.HasAura(12345) || obj.AuraStacks(12345) != 0 {
 		t.Fatalf("aura should be gone stacks=%d", obj.AuraStacks(12345))
+	}
+	if dur := obj.AuraDuration(12345); dur != 0 {
+		t.Fatalf("expected duration 0 after remove, got %v", dur)
 	}
 }
 

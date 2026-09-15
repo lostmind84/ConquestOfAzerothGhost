@@ -14,6 +14,7 @@ type SpellCastResult struct {
 	SpellID    uint32
 	Success    bool
 	FailReason uint8
+	CastTimeMs uint32 // Server-reported cast bar duration from SMSG_SPELL_START (in milliseconds; 0 for instant)
 }
 
 // ArmSpellWaiter installs a spell-result hook to feed a buffered channel.
@@ -43,14 +44,22 @@ func (s *Session) ArmSpellWaiter() {
 	s.spellHookOn = true
 	chPtr := &s.spellCh
 	logf := s.logf
+	var lastCastTimeMs uint32
+	s.World.AddSpellStartHook(func(spellID uint32, castTimeMs uint32) {
+		s.mu.Lock()
+		lastCastTimeMs = castTimeMs
+		s.mu.Unlock()
+	})
 	s.World.AddSpellCastResultHook(func(spellID uint32, success bool, failReason uint8) {
 		s.mu.Lock()
+		cTime := lastCastTimeMs
+		lastCastTimeMs = 0
 		ch := *chPtr
 		s.mu.Unlock()
 		if ch == nil {
 			return
 		}
-		res := SpellCastResult{SpellID: spellID, Success: success, FailReason: failReason}
+		res := SpellCastResult{SpellID: spellID, Success: success, FailReason: failReason, CastTimeMs: cTime}
 		select {
 		case ch <- res:
 		default:
@@ -96,21 +105,53 @@ func (s *Session) WaitSpellID(spellID uint32, d time.Duration) (SpellCastResult,
 	return SpellCastResult{}, fmt.Errorf("timeout spell %d cast result", spellID)
 }
 
-// CastAndWait casts spell at target and waits for success (SMSG_SPELL_GO) or fail.
-func CastAndWait(t *testing.T, s *Session, spellID uint32, targetGUID uint64, timeout time.Duration) SpellCastResult {
+// CastAndMeasure casts spell at target and waits for success (SMSG_SPELL_GO) or fail, returning result and elapsed duration.
+func CastAndMeasure(t *testing.T, s *Session, spellID uint32, targetGUID uint64, timeout time.Duration) (SpellCastResult, time.Duration) {
 	t.Helper()
 	s.ArmSpellWaiter()
 	if targetGUID != 0 {
 		_ = s.World.SetTarget(targetGUID)
 	}
+	start := time.Now()
 	if err := s.World.CastSpell(spellID, targetGUID); err != nil {
 		t.Fatalf("cast %d: %v", spellID, err)
 	}
 	res, err := s.WaitSpellID(spellID, timeout)
+	dur := time.Since(start)
 	if err != nil {
 		t.Fatalf("wait cast %d: %v", spellID, err)
 	}
+	return res, dur
+}
+
+// CastAndWait casts spell at target and waits for success (SMSG_SPELL_GO) or fail.
+func CastAndWait(t *testing.T, s *Session, spellID uint32, targetGUID uint64, timeout time.Duration) SpellCastResult {
+	t.Helper()
+	res, _ := CastAndMeasure(t, s, spellID, targetGUID, timeout)
 	return res
+}
+
+// AssertCastDuration casts spell at target, fails unless SMSG_SPELL_GO is received,
+// and asserts that elapsed cast time is within [expected - tolerance, expected + tolerance].
+func AssertCastDuration(t *testing.T, s *Session, spellID uint32, targetGUID uint64, expected time.Duration, tolerance time.Duration) time.Duration {
+	t.Helper()
+	timeout := expected + tolerance + 5*time.Second
+	res, dur := CastAndMeasure(t, s, spellID, targetGUID, timeout)
+	if !res.Success {
+		t.Fatalf("spell %d failed reason=%d (%s) (want SMSG_SPELL_GO)",
+			spellID, res.FailReason, SpellFailReasonName(res.FailReason))
+	}
+	minDur := expected - tolerance
+	if minDur < 0 {
+		minDur = 0
+	}
+	maxDur := expected + tolerance
+	if dur < minDur || dur > maxDur {
+		t.Fatalf("spell %d cast duration %v outside expected range [%v, %v] (target %v +/- %v)",
+			spellID, dur, minDur, maxDur, expected, tolerance)
+	}
+	t.Logf("spell %d OK (SPELL_GO) in %v (expected %v +/- %v)", spellID, dur, expected, tolerance)
+	return dur
 }
 
 // MustCastSuccess casts and fails the test unless SMSG_SPELL_GO is received.

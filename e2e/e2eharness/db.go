@@ -55,13 +55,13 @@ func EnsureAccount(db *sql.DB, username, password string) error {
 	var id int
 	err := db.QueryRow(`SELECT id FROM account WHERE username=?`, u).Scan(&id)
 	if err == sql.ErrNoRows {
-		_, err = db.Exec(`INSERT INTO account (username, salt, verifier, expansion) VALUES (?,?,?,2)`, u, salt, verifier)
+		_, err = db.Exec(`INSERT INTO account (username, salt, verifier, expansion, os) VALUES (?,?,?,2,'Win')`, u, salt, verifier)
 		return err
 	}
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE account SET salt=?, verifier=? WHERE username=?`, salt, verifier, u)
+	_, err = db.Exec(`UPDATE account SET salt=?, verifier=?, os='Win' WHERE username=?`, salt, verifier, u)
 	return err
 }
 

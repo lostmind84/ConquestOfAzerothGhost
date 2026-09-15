@@ -25,6 +25,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -504,6 +505,10 @@ type WorldObject struct {
 	auraSlots map[uint8]uint32
 	// slot -> stack/charges count from SMSG_AURA_UPDATE (0 treated as 1 when present).
 	auraSlotStacks map[uint8]uint8
+	// slot -> max duration in milliseconds from SMSG_AURA_UPDATE (0 if not sent/permanent).
+	auraSlotMaxDuration map[uint8]uint32
+	// slot -> remaining duration in milliseconds from SMSG_AURA_UPDATE (0 if not sent/permanent).
+	auraSlotDuration map[uint8]uint32
 }
 
 // Clone returns a deep copy of the WorldObject. This gives callers (e.g. AI logic)
@@ -569,6 +574,18 @@ func (o *WorldObject) Clone() *WorldObject {
 		clone.auraSlotStacks = make(map[uint8]uint8, len(o.auraSlotStacks))
 		for slot, n := range o.auraSlotStacks {
 			clone.auraSlotStacks[slot] = n
+		}
+	}
+	if len(o.auraSlotMaxDuration) > 0 {
+		clone.auraSlotMaxDuration = make(map[uint8]uint32, len(o.auraSlotMaxDuration))
+		for slot, d := range o.auraSlotMaxDuration {
+			clone.auraSlotMaxDuration[slot] = d
+		}
+	}
+	if len(o.auraSlotDuration) > 0 {
+		clone.auraSlotDuration = make(map[uint8]uint32, len(o.auraSlotDuration))
+		for slot, d := range o.auraSlotDuration {
+			clone.auraSlotDuration[slot] = d
 		}
 	}
 	o.aurasMu.RUnlock()
@@ -776,6 +793,55 @@ func (o *WorldObject) AuraStacks(spellID uint32) int {
 	return max
 }
 
+// AuraDuration returns the remaining duration (from SMSG_AURA_UPDATE) for spellID on this object,
+// or 0 if missing/permanent. If remaining duration is 0 but maxDuration > 0, returns maxDuration.
+func (o *WorldObject) AuraDuration(spellID uint32) time.Duration {
+	if o == nil {
+		return 0
+	}
+	o.aurasMu.RLock()
+	defer o.aurasMu.RUnlock()
+	if o.auraSlots == nil {
+		return 0
+	}
+	for slot, id := range o.auraSlots {
+		if id == spellID {
+			if o.auraSlotDuration != nil {
+				if dur := o.auraSlotDuration[slot]; dur > 0 {
+					return time.Duration(dur) * time.Millisecond
+				}
+			}
+			if o.auraSlotMaxDuration != nil {
+				if maxDur := o.auraSlotMaxDuration[slot]; maxDur > 0 {
+					return time.Duration(maxDur) * time.Millisecond
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// AuraMaxDuration returns the max duration (from SMSG_AURA_UPDATE) for spellID on this object,
+// or 0 if missing/permanent.
+func (o *WorldObject) AuraMaxDuration(spellID uint32) time.Duration {
+	if o == nil {
+		return 0
+	}
+	o.aurasMu.RLock()
+	defer o.aurasMu.RUnlock()
+	if o.auraSlots == nil || o.auraSlotMaxDuration == nil {
+		return 0
+	}
+	for slot, id := range o.auraSlots {
+		if id == spellID {
+			if maxDur := o.auraSlotMaxDuration[slot]; maxDur > 0 {
+				return time.Duration(maxDur) * time.Millisecond
+			}
+		}
+	}
+	return 0
+}
+
 // GetActiveAuras returns a snapshot of active spell IDs on the object.
 func (o *WorldObject) GetActiveAuras() []uint32 {
 	if o == nil {
@@ -796,7 +862,8 @@ func (o *WorldObject) GetActiveAuras() []uint32 {
 // setAuraForSlot records that a slot now holds spellID (or 0 to clear the slot).
 // Maintains both the set (for fast HasAura) and the slot map (for accurate removes).
 // stacks is the stackOrCharges byte from SMSG_AURA_UPDATE (ignored when spellID==0).
-func (o *WorldObject) setAuraForSlot(slot uint8, spellID uint32, stacks uint8) {
+// maxDur and dur are from SMSG_AURA_UPDATE (in ms, 0 if not sent/permanent).
+func (o *WorldObject) setAuraForSlot(slot uint8, spellID uint32, stacks uint8, maxDur, dur uint32) {
 	o.aurasMu.Lock()
 	defer o.aurasMu.Unlock()
 	if o.activeAuras == nil {
@@ -828,6 +895,12 @@ func (o *WorldObject) setAuraForSlot(slot uint8, spellID uint32, stacks uint8) {
 		if prev, had := o.auraSlots[slot]; had && prev != 0 {
 			delete(o.auraSlots, slot)
 			delete(o.auraSlotStacks, slot)
+			if o.auraSlotMaxDuration != nil {
+				delete(o.auraSlotMaxDuration, slot)
+			}
+			if o.auraSlotDuration != nil {
+				delete(o.auraSlotDuration, slot)
+			}
 			still := false
 			for _, id := range o.auraSlots {
 				if id == prev {
@@ -841,6 +914,12 @@ func (o *WorldObject) setAuraForSlot(slot uint8, spellID uint32, stacks uint8) {
 		} else {
 			delete(o.auraSlots, slot)
 			delete(o.auraSlotStacks, slot)
+			if o.auraSlotMaxDuration != nil {
+				delete(o.auraSlotMaxDuration, slot)
+			}
+			if o.auraSlotDuration != nil {
+				delete(o.auraSlotDuration, slot)
+			}
 		}
 		return
 	}
@@ -849,6 +928,23 @@ func (o *WorldObject) setAuraForSlot(slot uint8, spellID uint32, stacks uint8) {
 		stacks = 1
 	}
 	o.auraSlotStacks[slot] = stacks
+	if maxDur > 0 || dur > 0 {
+		if o.auraSlotMaxDuration == nil {
+			o.auraSlotMaxDuration = make(map[uint8]uint32)
+		}
+		if o.auraSlotDuration == nil {
+			o.auraSlotDuration = make(map[uint8]uint32)
+		}
+		o.auraSlotMaxDuration[slot] = maxDur
+		o.auraSlotDuration[slot] = dur
+	} else {
+		if o.auraSlotMaxDuration != nil {
+			delete(o.auraSlotMaxDuration, slot)
+		}
+		if o.auraSlotDuration != nil {
+			delete(o.auraSlotDuration, slot)
+		}
+	}
 	o.activeAuras[spellID] = struct{}{}
 }
 
@@ -867,6 +963,12 @@ func (o *WorldObject) removeAura(spellID uint32) {
 				if o.auraSlotStacks != nil {
 					delete(o.auraSlotStacks, s)
 				}
+				if o.auraSlotMaxDuration != nil {
+					delete(o.auraSlotMaxDuration, s)
+				}
+				if o.auraSlotDuration != nil {
+					delete(o.auraSlotDuration, s)
+				}
 			}
 		}
 	}
@@ -879,6 +981,8 @@ func (o *WorldObject) clearAuras() {
 	o.activeAuras = nil
 	o.auraSlots = nil
 	o.auraSlotStacks = nil
+	o.auraSlotMaxDuration = nil
+	o.auraSlotDuration = nil
 }
 
 // GUIDField reads a 2×uint32 ObjectGuid from Values at fieldIndex (low then high).
@@ -921,6 +1025,8 @@ type WorldClient struct {
 	encryptClient *rc4.Cipher
 	encrypted     bool
 
+	plaintextWorldHeaders bool
+
 	sendMu sync.Mutex
 	moveMu sync.Mutex
 
@@ -958,8 +1064,10 @@ type WorldClient struct {
 	objects   map[uint64]*WorldObject
 
 	// Known spells
-	spellsMu    sync.RWMutex
-	knownSpells map[uint32]*KnownSpell
+	spellsMu           sync.RWMutex
+	knownSpells        map[uint32]*KnownSpell
+	initialSpellCounts map[uint32]int
+	learnedSpellCounts map[uint32]int
 
 	// Cooldowns
 	cooldownsMu sync.RWMutex
@@ -1044,6 +1152,7 @@ type WorldClient struct {
 	lootRollWonHooks       []lootRollWonHook
 	lootAllPassedHooks     []lootAllPassedHook
 	spellCastResultHooks   []spellCastResultHook
+	spellStartHooks        []spellStartHook
 	groupInviteHooks       []groupInviteHook
 	groupDeclineHooks      []groupDeclineHook
 	groupListHooks         []groupListHook
@@ -1142,24 +1251,57 @@ type GroupState struct {
 // logFunc nil → fully silent. Non-nil defaults to LogInfo (lifecycle / sparse diagnostics;
 // hot paths and per-spell learn lines require LogDebug / LogTrace via SetLogLevel).
 func NewWorldClient(username string, sessionKey []byte, logFunc func(string, ...interface{})) *WorldClient {
+	plaintext := false
+	if v := os.Getenv("E2E_PLAINTEXT_HEADERS"); v == "1" || strings.EqualFold(v, "true") {
+		plaintext = true
+	} else if v := os.Getenv("ACORE_PLAINTEXT_HEADERS"); v == "1" || strings.EqualFold(v, "true") {
+		plaintext = true
+	}
+
 	return &WorldClient{
-		username:    strings.ToUpper(username),
-		sessionKey:  sessionKey,
-		loginDone:   make(chan struct{}),
-		logoutDone:  make(chan struct{}),
-		stopChan:    make(chan struct{}),
-		logFunc:     logFunc,
-		logLevel:    LogInfo,
-		objects:     make(map[uint64]*WorldObject),
-		knownSpells: make(map[uint32]*KnownSpell),
-		cooldowns:   make(map[uint32]*SpellCooldown),
-		moveSpeed:   BaseSpeedRun,
+		username:              strings.ToUpper(username),
+		sessionKey:            sessionKey,
+		plaintextWorldHeaders: plaintext,
+		loginDone:             make(chan struct{}),
+		logoutDone:            make(chan struct{}),
+		stopChan:              make(chan struct{}),
+		logFunc:               logFunc,
+		logLevel:              LogInfo,
+		objects:               make(map[uint64]*WorldObject),
+		knownSpells:           make(map[uint32]*KnownSpell),
+		initialSpellCounts:    make(map[uint32]int),
+		learnedSpellCounts:    make(map[uint32]int),
+		cooldowns:             make(map[uint32]*SpellCooldown),
+		moveSpeed:             BaseSpeedRun,
 		lastMovDebug: make(map[uint64]struct {
 			ts      uint32
 			x, y, z float32
 			wall    time.Time
 		}),
 	}
+}
+
+// SetPlaintextHeaders controls whether world packet headers are sent and received
+// in plaintext (unencrypted). When true, ARC4 header encryption is omitted.
+// This is required on Ascension / Conquest of Azeroth when
+// AscensionCompat.PlaintextWorldHeaders is enabled.
+func (w *WorldClient) SetPlaintextHeaders(enabled bool) {
+	if w == nil {
+		return
+	}
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	w.plaintextWorldHeaders = enabled
+}
+
+// PlaintextHeaders reports whether plaintext world headers are enabled.
+func (w *WorldClient) PlaintextHeaders() bool {
+	if w == nil {
+		return false
+	}
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	return w.plaintextWorldHeaders
 }
 
 // SetLogLevel filters WorldClient diagnostics when logFunc is non-nil.
@@ -1300,9 +1442,13 @@ func (w *WorldClient) handleAuthChallenge() error {
 
 	w.sendPacketUnencrypted(CmsgAuthSession, buf.Bytes())
 
-	// Set up encryption
-	w.setupEncryption()
-	w.setPhase(PhaseConnected, "CMSG_AUTH_SESSION+crypto")
+	if w.plaintextWorldHeaders {
+		w.setPhase(PhaseConnected, "CMSG_AUTH_SESSION (plaintext)")
+	} else {
+		// Set up encryption
+		w.setupEncryption()
+		w.setPhase(PhaseConnected, "CMSG_AUTH_SESSION+crypto")
+	}
 
 	return nil
 }
@@ -1427,9 +1573,9 @@ func (w *WorldClient) readPacket() (uint16, []byte, error) {
 		return opcode, data, nil
 	}
 
-	// Unencrypted (only auth phase)
+	// Unencrypted (only auth phase, or plaintext headers mode for Ascension / Conquest of Azeroth)
 	if w.conn != nil {
-		_ = w.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		_ = w.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 	}
 	if _, err := io.ReadFull(w.readBuf, hdr[:1]); err != nil {
 		return 0, nil, fmt.Errorf("read first byte: %w", err)
@@ -1447,8 +1593,14 @@ func (w *WorldClient) readPacket() (uint16, []byte, error) {
 			return opcode, nil, nil
 		}
 		payloadSize := int(size) - 2
+		if payloadSize > 10*1024*1024 {
+			return 0, nil, fmt.Errorf("packet too large: %d", payloadSize)
+		}
 		if payloadSize == 0 {
 			return opcode, nil, nil
+		}
+		if w.conn != nil {
+			_ = w.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		}
 		data := make([]byte, payloadSize)
 		if _, err := io.ReadFull(w.readBuf, data); err != nil {
@@ -1468,11 +1620,14 @@ func (w *WorldClient) readPacket() (uint16, []byte, error) {
 		return opcode, nil, nil
 	}
 	payloadSize := int(size) - 2
+	if payloadSize > 10*1024*1024 {
+		return 0, nil, fmt.Errorf("packet too large: %d", payloadSize)
+	}
 	if payloadSize == 0 {
 		return opcode, nil, nil
 	}
 	if w.conn != nil {
-		_ = w.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		_ = w.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 	}
 	data := make([]byte, payloadSize)
 	if _, err := io.ReadFull(w.readBuf, data); err != nil {
@@ -1586,6 +1741,8 @@ func (w *WorldClient) handlePacket(opcode uint16, data []byte) {
 		w.handleSupercededSpell(data)
 	case SmsgRemovedSpell:
 		w.handleRemovedSpell(data)
+	case SmsgSpellStart:
+		w.handleSpellStart(data)
 	case SmsgSpellGo:
 		w.handleSpellGo(data)
 	case SmsgSpellFailure:
@@ -2532,6 +2689,24 @@ func (w *WorldClient) SelfAuras() []uint32 {
 		return nil
 	}
 	return obj.GetActiveAuras()
+}
+
+// SelfAuraDuration returns remaining duration (or max duration) for spellID on the player.
+func (w *WorldClient) SelfAuraDuration(spellID uint32) time.Duration {
+	obj := w.GetObject(w.CharGUID())
+	if obj == nil {
+		return 0
+	}
+	return obj.AuraDuration(spellID)
+}
+
+// SelfAuraMaxDuration returns max duration for spellID on the player.
+func (w *WorldClient) SelfAuraMaxDuration(spellID uint32) time.Duration {
+	obj := w.GetObject(w.CharGUID())
+	if obj == nil {
+		return 0
+	}
+	return obj.AuraMaxDuration(spellID)
 }
 
 // CastSpellAtPosition sends a spell targeted at a world position (ground-targeted AoE).
@@ -3543,6 +3718,28 @@ func (w *WorldClient) KnowsSpell(spellID uint32) bool {
 	return ok && sp.Active
 }
 
+// SpellLearnedCount returns how many times SMSG_LEARNED_SPELL was received for this spell ID.
+func (w *WorldClient) SpellLearnedCount(spellID uint32) int {
+	w.spellsMu.RLock()
+	defer w.spellsMu.RUnlock()
+	return w.learnedSpellCounts[spellID]
+}
+
+// InitialSpellCount returns how many times this spell ID appeared in SMSG_INITIAL_SPELLS.
+func (w *WorldClient) InitialSpellCount(spellID uint32) int {
+	w.spellsMu.RLock()
+	defer w.spellsMu.RUnlock()
+	return w.initialSpellCounts[spellID]
+}
+
+// SpellbookCount returns the total number of times the spell was granted to the client
+// (via SMSG_INITIAL_SPELLS and SMSG_LEARNED_SPELL).
+func (w *WorldClient) SpellbookCount(spellID uint32) int {
+	w.spellsMu.RLock()
+	defer w.spellsMu.RUnlock()
+	return w.initialSpellCounts[spellID] + w.learnedSpellCounts[spellID]
+}
+
 // MoveSpeed returns the current movement speed.
 func (w *WorldClient) MoveSpeed() float32 {
 	return w.moveSpeed
@@ -3787,6 +3984,9 @@ func (w *WorldClient) handleInitialSpells(data []byte) {
 	binary.Read(r, binary.LittleEndian, &spellCount)
 
 	w.spellsMu.Lock()
+	if w.initialSpellCounts == nil {
+		w.initialSpellCounts = make(map[uint32]int)
+	}
 	for i := uint16(0); i < spellCount; i++ {
 		var spellID uint32
 		binary.Read(r, binary.LittleEndian, &spellID)
@@ -3794,6 +3994,7 @@ func (w *WorldClient) handleInitialSpells(data []byte) {
 		binary.Read(r, binary.LittleEndian, &unk) // slot index or flags
 
 		w.knownSpells[spellID] = &KnownSpell{SpellID: spellID, Active: unk == 0}
+		w.initialSpellCounts[spellID]++
 	}
 	first := !w.initialSpellsLogged
 	if first {
@@ -3817,7 +4018,11 @@ func (w *WorldClient) handleLearnedSpell(data []byte) {
 	}
 	spellID := binary.LittleEndian.Uint32(data[0:4])
 	w.spellsMu.Lock()
+	if w.learnedSpellCounts == nil {
+		w.learnedSpellCounts = make(map[uint32]int)
+	}
 	w.knownSpells[spellID] = &KnownSpell{SpellID: spellID, Active: true}
+	w.learnedSpellCounts[spellID]++
 	w.learnedLogCount++
 	w.lastLearnedSpell = spellID
 	w.spellsMu.Unlock()
@@ -3870,6 +4075,27 @@ func (w *WorldClient) handleRemovedSpell(data []byte) {
 	delete(w.knownSpells, spellID)
 	w.spellsMu.Unlock()
 	w.logAt(LogDebug, "SMSG_REMOVED_SPELL %d", spellID)
+}
+
+func (w *WorldClient) handleSpellStart(data []byte) {
+	if len(data) < 17 {
+		return
+	}
+	r := bytes.NewReader(data)
+	casterGUID, _ := readPackedGUID(r)
+	_, _ = readPackedGUID(r) // casterUnit or item
+	var castID uint8
+	binary.Read(r, binary.LittleEndian, &castID)
+	var spellID uint32
+	binary.Read(r, binary.LittleEndian, &spellID)
+	var castFlags uint32
+	binary.Read(r, binary.LittleEndian, &castFlags)
+	var castTimeMs uint32
+	binary.Read(r, binary.LittleEndian, &castTimeMs)
+
+	if casterGUID == w.charGUID {
+		w.invokeSpellStartHooks(spellID, castTimeMs)
+	}
 }
 
 func (w *WorldClient) handleSpellGo(data []byte) {
@@ -4010,40 +4236,39 @@ const (
 //	  [if !(flags & AFLAG_CASTER)] packed caster GUID
 //	  [if flags & AFLAG_DURATION]  uint32 maxDuration, uint32 duration
 //	  [if flags & AFLAG_ANY_EFFECT_AMOUNT_SENT] int32 amount per effect bit
-func parseAuraSlotUpdate(r *bytes.Reader) (slot uint8, spellID uint32, stacks uint8, ok bool) {
+func parseAuraSlotUpdate(r *bytes.Reader) (slot uint8, spellID uint32, stacks uint8, maxDur, dur uint32, ok bool) {
 	if err := binary.Read(r, binary.LittleEndian, &slot); err != nil {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 	if err := binary.Read(r, binary.LittleEndian, &spellID); err != nil {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 	if spellID == 0 {
 		// Remove: packet ends after spellId 0 (no flags/header).
-		return slot, 0, 0, true
+		return slot, 0, 0, 0, 0, true
 	}
 	var flags, casterLevel, stackOrCharges uint8
 	if err := binary.Read(r, binary.LittleEndian, &flags); err != nil {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 	if err := binary.Read(r, binary.LittleEndian, &casterLevel); err != nil {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 	if err := binary.Read(r, binary.LittleEndian, &stackOrCharges); err != nil {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 	// Caster GUID is omitted only when AFLAG_CASTER is set (self-cast).
 	if flags&auraFlagCaster == 0 {
 		if _, err := readPackedGUID(r); err != nil {
-			return 0, 0, 0, false
+			return 0, 0, 0, 0, 0, false
 		}
 	}
 	if flags&auraFlagDuration != 0 {
-		var maxDur, dur uint32
 		if err := binary.Read(r, binary.LittleEndian, &maxDur); err != nil {
-			return 0, 0, 0, false
+			return 0, 0, 0, 0, 0, false
 		}
 		if err := binary.Read(r, binary.LittleEndian, &dur); err != nil {
-			return 0, 0, 0, false
+			return 0, 0, 0, 0, 0, false
 		}
 	}
 	// Effect amounts (int32 each) when AFLAG_ANY_EFFECT_AMOUNT_SENT + effect index bits.
@@ -4054,11 +4279,11 @@ func parseAuraSlotUpdate(r *bytes.Reader) (slot uint8, spellID uint32, stacks ui
 			}
 			var amount int32
 			if err := binary.Read(r, binary.LittleEndian, &amount); err != nil {
-				return 0, 0, 0, false
+				return 0, 0, 0, 0, 0, false
 			}
 		}
 	}
-	return slot, spellID, stackOrCharges, true
+	return slot, spellID, stackOrCharges, maxDur, dur, true
 }
 
 // handleAuraUpdate handles SMSG_AURA_UPDATE (incremental single-target aura slot updates).
@@ -4071,11 +4296,11 @@ func (w *WorldClient) handleAuraUpdate(data []byte) {
 	obj := w.getOrCreateObject(targetGUID)
 
 	for {
-		slot, spellID, stacks, ok := parseAuraSlotUpdate(r)
+		slot, spellID, stacks, maxDur, dur, ok := parseAuraSlotUpdate(r)
 		if !ok {
 			break
 		}
-		obj.setAuraForSlot(slot, spellID, stacks)
+		obj.setAuraForSlot(slot, spellID, stacks, maxDur, dur)
 		if w.OnObjectUpdate != nil {
 			w.OnObjectUpdate(targetGUID, obj.Clone())
 		}
@@ -4093,12 +4318,12 @@ func (w *WorldClient) handleAuraUpdateAll(data []byte) {
 	obj.clearAuras()
 
 	for {
-		slot, spellID, stacks, ok := parseAuraSlotUpdate(r)
+		slot, spellID, stacks, maxDur, dur, ok := parseAuraSlotUpdate(r)
 		if !ok {
 			break
 		}
 		if spellID != 0 {
-			obj.setAuraForSlot(slot, spellID, stacks)
+			obj.setAuraForSlot(slot, spellID, stacks, maxDur, dur)
 		}
 	}
 

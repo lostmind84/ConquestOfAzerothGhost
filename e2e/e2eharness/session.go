@@ -97,6 +97,16 @@ func LoginBot(t *testing.T, opt LoginOptions) (*Session, error) {
 		t.Logf("[%s] "+format, append([]interface{}{opt.User}, args...)...)
 	}
 	w := client.NewWorldClient(strings.ToUpper(opt.User), sessionKey, logFn)
+	if raw, ok := os.LookupEnv("E2E_PLAINTEXT_HEADERS"); ok {
+		if raw == "1" || strings.EqualFold(raw, "true") {
+			w.SetPlaintextHeaders(true)
+		} else if raw == "0" || strings.EqualFold(raw, "false") {
+			w.SetPlaintextHeaders(false)
+		}
+	} else {
+		// Default to plaintext headers for local Conquest of Azeroth / Ascension testing
+		w.SetPlaintextHeaders(true)
+	}
 	// Default LogInfo: phase/trade/login/GM short lines; not per-spell or combat thrash.
 	// Override with E2E_WORLD_LOG=debug|trace|warn|error|silent for deeper dumps.
 	if raw, ok := os.LookupEnv("E2E_WORLD_LOG"); ok {

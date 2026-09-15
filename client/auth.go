@@ -117,10 +117,11 @@ func (a *AuthClient) Authenticate(authAddr string) ([]RealmInfo, error) {
 }
 
 func (a *AuthClient) sendLogonChallenge() error {
-	// FourCC values are sent in reverse byte order per the WoW protocol
-	gameName := [4]byte{0, 'W', 'o', 'W'}  // "WoW" reversed
-	platform := [4]byte{0, '6', '8', 'x'}  // "x86" reversed
-	os := [4]byte{0, 'n', 'i', 'W'}        // "Win" reversed
+	// FourCC values are sent in reverse byte order per the WoW protocol (little-endian uint32)
+	// For 3-character strings with a null terminator, the reversed bytes end with 0, not start with 0.
+	gameName := [4]byte{'W', 'o', 'W', 0}  // "WoW" reversed
+	platform := [4]byte{'6', '8', 'x', 0}  // "x86" reversed
+	os := [4]byte{'n', 'i', 'W', 0}        // "Win" reversed
 	country := [4]byte{'S', 'U', 'n', 'e'} // "enUS" reversed
 
 	loginBytes := []byte(a.username)

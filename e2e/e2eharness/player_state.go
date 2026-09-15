@@ -349,6 +349,16 @@ func (b *ScenarioBot) AuraStacks(spellID uint32) int {
 	return b.World.SelfAuraStacks(spellID)
 }
 
+// AuraDuration returns remaining duration (or max duration) for spellID on the player.
+func (b *ScenarioBot) AuraDuration(spellID uint32) time.Duration {
+	return b.World.SelfAuraDuration(spellID)
+}
+
+// AuraMaxDuration returns max duration for spellID on the player.
+func (b *ScenarioBot) AuraMaxDuration(spellID uint32) time.Duration {
+	return b.World.SelfAuraMaxDuration(spellID)
+}
+
 // UnitAuraStacks returns stack count for spellID on a tracked unit.
 func (b *ScenarioBot) UnitAuraStacks(guid uint64, spellID uint32) int {
 	obj := b.World.GetObject(guid)
@@ -356,6 +366,15 @@ func (b *ScenarioBot) UnitAuraStacks(guid uint64, spellID uint32) int {
 		return 0
 	}
 	return obj.AuraStacks(spellID)
+}
+
+// UnitAuraDuration returns remaining duration for spellID on a tracked unit.
+func (b *ScenarioBot) UnitAuraDuration(guid uint64, spellID uint32) time.Duration {
+	obj := b.World.GetObject(guid)
+	if obj == nil {
+		return 0
+	}
+	return obj.AuraDuration(spellID)
 }
 
 // --- target waiters ---
