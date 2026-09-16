@@ -3187,10 +3187,17 @@ func (w *WorldClient) CancelAura(spellID uint32) error {
 	return w.sendPacket(CmsgCancelAura, buf.Bytes())
 }
 
-// CancelCast sends CMSG_CANCEL_CAST (optional cast count; 0 is fine).
+// CancelCast sends CMSG_CANCEL_CAST for whatever spell is being cast.
 func (w *WorldClient) CancelCast() error {
+	return w.CancelCastSpell(0)
+}
+
+// CancelCastSpell sends CMSG_CANCEL_CAST: a cast counter the server ignores, then the spell id to interrupt
+// (0 interrupts any current cast). Without the spell id the server fails to read the packet and cancels nothing.
+func (w *WorldClient) CancelCastSpell(spellID uint32) error {
 	buf := new(bytes.Buffer)
 	_ = binary.Write(buf, binary.LittleEndian, uint8(0))
+	_ = binary.Write(buf, binary.LittleEndian, spellID)
 	return w.sendPacket(CmsgCancelCast, buf.Bytes())
 }
 
