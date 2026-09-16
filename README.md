@@ -19,6 +19,22 @@ $env:E2E_DBC_PATH="C:\CoA\Data\dbc"
 go test -tags=e2e ./e2e/classes/chronomancer/time -run TestChronomancer -v
 ```
 
+On Linux/macOS, put the same variables in a `.env` file (gitignored). Quote the
+values, because DSNs contain parentheses:
+
+```
+E2E_AUTH_DSN='root:password@tcp(127.0.0.1:3306)/acore_auth'
+E2E_CHAR_DSN='root:password@tcp(127.0.0.1:3306)/acore_characters'
+E2E_WORLD_DSN='root:password@tcp(127.0.0.1:3306)/acore_world'
+E2E_PLAINTEXT_HEADERS='1'
+E2E_DBC_PATH='/path/to/CoA-Repack/Data/dbc'
+```
+
+```bash
+set -a; . ./.env; set +a
+go test -tags=e2e ./e2e/classes/chronomancer/time -run TestChronomancer -count=1 -v
+```
+
 ## Example Output:
 
 ```
