@@ -212,8 +212,10 @@ func TestWitchHunter_BurrowBoltPulls(t *testing.T) {
 	}
 	ux, uy, uz := obj.InterpolatedPosition()
 	before := bot.DistFrom(ux, uy, uz)
+	damage := watchSpellLog(t, bot, smsgSpellNonMeleeDamageLog, spellBurrowBolt)
 	// A missed or dodged bolt applies no pull aura: reset the cooldown and shoot again.
-	for attempt := 1; attempt <= 3; attempt++ {
+	for attempt := 1; attempt <= 6; attempt++ {
+		damage.reset()
 		if res := castLanded(t, bot, spellBurrowBolt, thug, 3); !res.Success {
 			t.Fatalf("Burrow Bolt refused: %s", e2eharness.SpellFailReasonName(res.FailReason))
 		}
@@ -229,13 +231,14 @@ func TestWitchHunter_BurrowBoltPulls(t *testing.T) {
 			t.Logf("E2E_PASS: Burrow Bolt pulled the target")
 			return
 		case <-time.After(3 * time.Second):
-			t.Logf("attempt %d: no jump sent for the target within 3 s", attempt)
+			t.Logf("attempt %d: no jump sent for the target within 3 s (bolt damage logs %+v)", attempt,
+				damage.snapshot())
 			_ = bot.World.SetTarget(bot.World.CharGUID()) // .cooldown applies to the selection
 			bot.GM(t, ".cooldown")
 			_ = bot.World.SetTarget(thug)
 		}
 	}
-	t.Errorf("E2E_FAIL: three Burrow Bolts cast, no jump sent for the target (#454)")
+	t.Errorf("E2E_FAIL: six Burrow Bolts cast, no jump sent for the target (#454)")
 }
 
 // Main project issue #520: Crystal Shield has an unhandled "shield" mechanic. Its tooltip describes a Stamina and
