@@ -42,7 +42,9 @@ func TestPrimalist_HammerOfLifePersists(t *testing.T) {
 func TestPrimalist_HammerOfLifeEffect(t *testing.T) {
 	bot := newBot(t, "PrHamE", e2eharness.RaceTauren, classPrimalist, 12)
 	takeTalent(t, bot, specPrimalistGrovekeeper, talentHammerOfLife, spellHammerOfLife)
-	dummy := spawnTarget(t, bot, e2eharness.CreatureHeroicTrainingDummy, 12)
+	// The heroic training dummy's armor keeps low-level hits at 2-4 damage, whose 20% rounds to 0: use a creature.
+	dummy := spawnTarget(t, bot, creatureDefiasThug, 12)
+	bot.GM(t, ".npc set faction 7")
 	damage := watchSpellLog(t, bot, smsgSpellNonMeleeDamageLog, spellHammerOfLifeDamage)
 	heals := watchSpellLog(t, bot, smsgSpellHealLog, spellHammerOfLifeHeal)
 	swings := watchSwings(t, bot)
