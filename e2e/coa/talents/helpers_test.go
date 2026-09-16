@@ -36,6 +36,7 @@ const (
 
 	smsgSpellNonMeleeDamageLog uint16 = 0x0250
 	smsgSpellHealLog           uint16 = 0x0150
+	smsgAttackerStateUpdate    uint16 = 0x014A
 
 	castTimeout = 5 * time.Second
 	settle      = time.Second
@@ -191,6 +192,38 @@ func (l *spellLog) snapshot() []spellEvent {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]spellEvent(nil), l.events...)
+}
+
+// swingCounter counts the bot's melee swings from SMSG_ATTACKERSTATEUPDATE.
+type swingCounter struct {
+	mu    sync.Mutex
+	count int
+}
+
+func watchSwings(t *testing.T, bot *e2eharness.ScenarioBot) *swingCounter {
+	t.Helper()
+	c := &swingCounter{}
+	self := bot.World.CharGUID()
+	cancel := bot.World.AddPacketHook(func(op uint16, data []byte) {
+		if op != smsgAttackerStateUpdate || len(data) < 5 {
+			return
+		}
+		r := bytes.NewReader(data[4:]) // hit info
+		if readPackedGUID(r) != self {
+			return
+		}
+		c.mu.Lock()
+		c.count++
+		c.mu.Unlock()
+	})
+	t.Cleanup(cancel)
+	return c
+}
+
+func (c *swingCounter) swings() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.count
 }
 
 func readPackedGUID(r *bytes.Reader) uint64 {
