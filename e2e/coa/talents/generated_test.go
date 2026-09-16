@@ -197,7 +197,6 @@ func TestWitchHunter_BurrowBoltPulls(t *testing.T) {
 		if readPackedGUID(r) != thug {
 			return
 		}
-		t.Logf("diag move %x", data)
 		if dest, ok := jumpDestination(r); ok {
 			select {
 			case jumps <- dest:
@@ -231,7 +230,9 @@ func TestWitchHunter_BurrowBoltPulls(t *testing.T) {
 			return
 		case <-time.After(3 * time.Second):
 			t.Logf("attempt %d: no jump sent for the target within 3 s", attempt)
+			_ = bot.World.SetTarget(bot.World.CharGUID()) // .cooldown applies to the selection
 			bot.GM(t, ".cooldown")
+			_ = bot.World.SetTarget(thug)
 		}
 	}
 	t.Errorf("E2E_FAIL: three Burrow Bolts cast, no jump sent for the target (#454)")

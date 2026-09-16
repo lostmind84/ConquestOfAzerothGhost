@@ -3,6 +3,7 @@
 package talents_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -39,6 +40,10 @@ const (
 	talentVampiricAura    uint32 = 6458
 	spellVampiricAuraHeal uint32 = 561095
 	spellCryptSwarm       uint32 = 500965
+
+	spellRaiseSkeletalWarrior uint32 = 500970
+	npcLesserSkeletalWarrior  uint32 = 50065
+	spellUndeadAssault        uint32 = 500982
 )
 
 var horusathBlastRanks = []uint32{500154, 502380, 502381, 502382, 502383, 502384, 502385, 572796, 572801}
@@ -269,4 +274,63 @@ func TestNecromancer_VampiricAuraIgnoresOwnDamageAboveHalfHealth(t *testing.T) {
 		return
 	}
 	t.Logf("E2E_PASS: no Vampiric Aura heal from the Necromancer's own damage at full health")
+}
+
+// Main project issue #1449 (health condition): Vampiric Aura heals the Necromancer from its minions' damage while it
+// is above 50% health.
+//
+//	go test -tags=e2e ./e2e/coa/talents -run VampiricAuraMinion -count=1 -v
+func TestNecromancer_VampiricAuraMinionAboveHalfHealth(t *testing.T) {
+	bot := newBot(t, "NcVampM", e2eharness.RaceUndead, classNecromancer, 19)
+	bot.SetTalentRank(t, talentVampiricAura, 1)
+	if !waitSpell(bot, spellVampiricAura, 5*time.Second) {
+		t.Fatalf("precondition: Vampiric Aura not learned")
+	}
+	for _, id := range []uint32{spellRaiseSkeletalWarrior, spellUndeadAssault} {
+		if !bot.World.KnowsSpell(id) {
+			bot.Learn(t, id)
+		}
+	}
+	dummy := spawnTarget(t, bot, e2eharness.CreatureHeroicTrainingDummy, 19)
+	heals := watchSpellLog(t, bot, smsgSpellHealLog, spellVampiricAuraHeal)
+	bot.CombatReadyFull(t)
+	if res := castLanded(t, bot, spellRaiseSkeletalWarrior, 0, 3); !res.Success {
+		t.Fatalf("Raise: Lesser Skeletal Warrior refused: %s", e2eharness.SpellFailReasonName(res.FailReason))
+	}
+	if waitOwnedUnits(bot, npcLesserSkeletalWarrior, 1, 3*time.Second) < 1 {
+		t.Fatalf("precondition: no Lesser Skeletal Warrior %d summoned", npcLesserSkeletalWarrior)
+	}
+	castLanded(t, bot, spellUndeadAssault, 0, 2)
+	bot.Attack(t, dummy)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := heals.snapshot(); len(got) > 0 {
+			t.Errorf("E2E_FAIL: at full health, Vampiric Aura healed the Necromancer %d time(s) (first %+v) (#1449)",
+				len(got), got[0])
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	hp, maxHP := bot.UnitHP(dummy)
+	t.Logf("no Vampiric Aura heal at full health in 15 s (dummy %d/%d)", hp, maxHP)
+
+	// Below 50% health the minion's damage must heal the Necromancer.
+	bot.GM(t, ".cheat god off")
+	_ = bot.World.SetTarget(bot.World.CharGUID())
+	bot.GM(t, ".gm on")
+	selfHP, selfMax := bot.UnitHP(bot.World.CharGUID())
+	bot.GM(t, fmt.Sprintf(".damage %d", selfHP-selfMax/3))
+	bot.GM(t, ".gm off")
+	_ = bot.World.SetTarget(dummy)
+	bot.Attack(t, dummy)
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := heals.snapshot(); len(got) > 0 {
+			t.Logf("E2E_PASS: below 50%% health, Vampiric Aura healed %d (%d/%d before)", got[0].amount, selfMax/3, selfMax)
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	nowHP, _ := bot.UnitHP(bot.World.CharGUID())
+	t.Errorf("E2E_FAIL: at %d/%d health with a minion attacking, no Vampiric Aura heal in 15 s (#1449)", nowHP, selfMax)
 }

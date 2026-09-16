@@ -100,6 +100,9 @@ func TestGuardian_SpikedReinforcementDamagesOnBlock(t *testing.T) {
 	})
 	defer cancelBlocks()
 	thug := spawnTarget(t, bot, creatureDefiasThug, 10)
+	bot.GM(t, ".npc set faction 14") // hostile to everyone, the pad's faction relations vary
+	bot.CombatReadyFull(t)           // the GM commands above turn GM mode back on; creatures ignore GMs
+	bot.Engage(t, thug, 15*time.Second)
 	bot.Attack(t, thug)
 	deadline := time.Now().Add(40 * time.Second)
 	for time.Now().Before(deadline) {
@@ -122,7 +125,7 @@ func TestGuardian_SpikedReinforcementDamagesOnBlock(t *testing.T) {
 
 // Main project issue #303: gaining a second kind of Oath removes the first.
 //
-//	go test -tags=e2e ./e2e/coa/talents -run TemplarOaths -count=1 -v
+//	go test -tags=e2e ./e2e/coa/talents -run Templar_Oaths -count=1 -v
 func TestTemplar_OathsOfDifferentKindsStack(t *testing.T) {
 	bot := newBot(t, "TpOath", e2eharness.RaceHuman, classTemplar, 6)
 	for _, id := range []uint32{spellRighteousLunge, spellCondemn} {
@@ -180,7 +183,7 @@ func TestTemplar_ScourgebaneDamageAtLevel10(t *testing.T) {
 // Main project issue #1416: choosing the Eternal specialization does not grant Rotclaw like the other Bloodmage
 // specializations grant their first row.
 //
-//	go test -tags=e2e ./e2e/coa/talents -run EternalRotclaw -count=1 -v
+//	go test -tags=e2e ./e2e/coa/talents -run EternalGrantsRotclaw -count=1 -v
 func TestBloodmage_EternalGrantsRotclaw(t *testing.T) {
 	bot := newBot(t, "BmRot", e2eharness.RaceHuman, classBloodmage, 10)
 	bot.SetSpecialization(t, specBloodmageEternal)
