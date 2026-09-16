@@ -76,6 +76,7 @@ go test -tags=e2e ./e2e/local -run 'TestGuild' -count=1 -v -timeout 20m
 | `E2E_AUTH_DSN`  | `acore:acore@tcp(127.0.0.1:3306)/acore_auth`                   |
 | `E2E_CHAR_DSN`  | `acore:acore@tcp(127.0.0.1:3306)/acore_characters`             |
 | `E2E_WORLD_DSN` | `acore:acore@tcp(127.0.0.1:3306)/acore_world`                  |
+| `E2E_WORLDSERVER_CONF` | unset — path to the live `worldserver.conf`; enables tests that change server settings (`ScenarioBot.SetWorldConfig`) |
 
 ## Layout
 
