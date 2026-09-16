@@ -78,9 +78,10 @@ func TestPrimalist_GroveTrainingProcsAftershock(t *testing.T) {
 	swings := watchSwings(t, bot)
 	bot.CombatReady(t)
 	bot.Attack(t, dummy)
-	// At 10% per hit, 40 swings leave a 1.5% chance of no proc at all.
-	deadline := time.Now().Add(150 * time.Second)
-	for time.Now().Before(deadline) && swings.swings() < 40 {
+	// 10% per landed hit; swings also count misses and dodges. Over five runs the first proc came after 4 to 24
+	// swings and once not within 40, so allow 100 swings.
+	deadline := time.Now().Add(360 * time.Second)
+	for time.Now().Before(deadline) && swings.swings() < 100 {
 		if bot.HasAura(auraAftershock) {
 			t.Logf("E2E_PASS: Grove Training granted Aftershock after %d swing(s)", swings.swings())
 			return

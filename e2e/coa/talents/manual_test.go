@@ -234,7 +234,11 @@ func TestSunCleric_DawnfallBuffsAlliesInside(t *testing.T) {
 		t.Fatalf("Dawnfall refused: %s", e2eharness.SpellFailReasonName(res.FailReason))
 	}
 	self := waitAura(bot, spellDawnfall, 3*time.Second)
-	enemy := bot.UnitHasAura(dummy, spellDawnfall)
+	enemy := false
+	for deadline := time.Now().Add(3 * time.Second); !enemy && time.Now().Before(deadline); {
+		enemy = bot.UnitHasAura(dummy, spellDawnfall)
+		time.Sleep(100 * time.Millisecond)
+	}
 	t.Logf("Dawnfall aura: caster %v, enemy dummy %v", self, enemy)
 	if !enemy {
 		t.Fatalf("precondition: the enemy inside Dawnfall has no %d aura either", spellDawnfall)
