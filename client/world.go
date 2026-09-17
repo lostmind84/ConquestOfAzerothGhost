@@ -154,6 +154,7 @@ const (
 	CmsgSwapInvItem   uint16 = 0x010D
 
 	// Quest opcodes
+	CmsgAreatrigger             uint16 = 0x00B4
 	CmsgQuestgiverHello         uint16 = 0x0184
 	SmsgQuestgiverQuestList     uint16 = 0x0185
 	CmsgQuestgiverAcceptQuest   uint16 = 0x0189
@@ -3305,6 +3306,13 @@ func (w *WorldClient) QuestgiverHello(npcGUID uint64) error {
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.LittleEndian, npcGUID)
 	return w.sendPacket(CmsgQuestgiverHello, buf.Bytes())
+}
+
+// SendAreaTrigger sends CMSG_AREATRIGGER, which the client sends when the player enters an AreaTrigger.dbc zone.
+func (w *WorldClient) SendAreaTrigger(triggerID uint32) error {
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.LittleEndian, triggerID)
+	return w.sendPacket(CmsgAreatrigger, buf.Bytes())
 }
 
 // QuestgiverAcceptQuest sends CMSG_QUESTGIVER_ACCEPT_QUEST
