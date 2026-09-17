@@ -13,6 +13,7 @@ import (
 )
 
 const (
+	spellGhoulOccupancy   uint32 = 805019 // "A Ghoul is currently occupying 1 Life Force."
 	spellRaiseGhoul       uint32 = 500971 // creature 50073, 1 Life Force
 	spellCommandGhouls    uint32 = 504021
 	spellGhoulCommand     uint32 = 801514 // cast by each Ghoul: damage, crit debuff, heal to the master
@@ -176,4 +177,38 @@ func TestNecromancer_CommandGhoulsEachGhoul(t *testing.T) {
 		return
 	}
 	t.Logf("E2E_PASS: every Ghoul expelled plague and healed the Necromancer (#1456)")
+}
+
+// Main project issue #141: each raised minion shows a buff on the Necromancer, and right-clicking that buff
+// dismisses the minion. The buff and the dismiss were missing.
+//
+//	go test -tags=e2e ./e2e/coa/summonspets2 -run CancelMinionBuffDismisses -count=1 -v
+func TestNecromancer_CancelMinionBuffDismisses(t *testing.T) {
+	bot, ghouls, _ := necromancerWithGhouls(t, "NcDism", ghoulLevel, 2)
+	visible := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline) && !visible; time.Sleep(100 * time.Millisecond) {
+		visible = bot.HasAura(spellGhoulOccupancy)
+	}
+	if !visible {
+		t.Fatalf("E2E_FAIL: no Ghoul buff (%d) on the Necromancer with 2 Ghouls raised (#141)", spellGhoulOccupancy)
+	}
+	bot.CancelAura(t, spellGhoulOccupancy)
+	time.Sleep(2 * time.Second)
+	alive := 0
+	for _, g := range ghouls {
+		if !unitDead(bot, g) {
+			alive++
+		}
+	}
+	t.Logf("after cancelling one Ghoul buff: %d of 2 Ghouls remain, buff %v", alive, bot.HasAura(spellGhoulOccupancy))
+	switch {
+	case alive == 2:
+		t.Errorf("E2E_FAIL: cancelling the Ghoul buff dismissed no Ghoul (#141)")
+	case alive == 0:
+		t.Errorf("E2E_FAIL: cancelling one Ghoul buff dismissed both Ghouls (#141)")
+	case !bot.HasAura(spellGhoulOccupancy):
+		t.Errorf("E2E_FAIL: the remaining Ghoul lost its buff (#141)")
+	default:
+		t.Logf("E2E_PASS: cancelling a Ghoul buff dismissed that Ghoul only (#141)")
+	}
 }

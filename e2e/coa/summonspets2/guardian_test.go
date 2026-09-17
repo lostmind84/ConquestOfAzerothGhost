@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azerothcore/AzerothGhost/client"
 	"github.com/azerothcore/AzerothGhost/e2e/e2eharness"
 )
 
@@ -75,4 +76,34 @@ func TestGuardian_ReclaimStandards(t *testing.T) {
 		return
 	}
 	t.Logf("E2E_PASS: Reclaim Standards removed the Standard and its marker (#1470, #1499)")
+}
+
+// Main project issues #1502 and #1503: creatures attack a placed Standard; it should not be attackable, so they go
+// for its Guardian instead.
+//
+//	go test -tags=e2e ./e2e/coa/summonspets2 -run StandardNotAttackable -count=1 -v
+func TestGuardian_StandardNotAttackable(t *testing.T) {
+	const unitFlagNonAttackable = 0x2
+	bot, standard := guardianWithStandard(t, "GdAtk")
+	o := bot.World.GetObject(standard)
+	if o == nil {
+		t.Fatalf("precondition: the Standard is not visible")
+	}
+	flags := o.Values[client.UnitFieldFlags]
+	sx, sy, sz := o.PosX, o.PosY, o.PosZ
+	x, y, z, m := bot.Pos()
+	bot.Teleport(t, sx+2, sy, sz, m)
+	boar := spawnTarget(t, bot, creatureMottledBoar, guardianLevel, factionHostile)
+	bot.Teleport(t, x, y, z, m)
+	// A game master is never attacked, so the Standard is the boar's only possible victim.
+	attacked := false
+	for deadline := time.Now().Add(6 * time.Second); time.Now().Before(deadline) && !attacked; time.Sleep(200 * time.Millisecond) {
+		attacked = bot.UnitTarget(boar) == standard || unitDead(bot, standard)
+	}
+	t.Logf("Standard unit flags 0x%X, attacked by a hostile boar: %v", flags, attacked)
+	if attacked || flags&unitFlagNonAttackable == 0 {
+		t.Errorf("E2E_FAIL: the Standard can be attacked (flags 0x%X, attacked %v) (#1502, #1503)", flags, attacked)
+		return
+	}
+	t.Logf("E2E_PASS: the Standard is not attackable (#1502, #1503)")
 }
