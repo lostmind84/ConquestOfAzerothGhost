@@ -2,6 +2,7 @@ package e2eharness
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
@@ -767,4 +768,37 @@ func findUnitSummonedBy(w *client.WorldClient, ownerGUID uint64, maxDist float32
 		}
 	}
 	return 0
+}
+
+// AddAndUseItem adds one item with GM .additem and uses it at once with CMSG_USE_ITEM and the item's
+// first spell, before any save: an item that was never saved is deleted immediately when destroyed,
+// unlike a saved one. The backpack slot comes from SMSG_ITEM_PUSH_RESULT and the item GUID from the
+// player's inventory update field. targetGUID 0 targets self.
+func (b *ScenarioBot) AddAndUseItem(t *testing.T, entry uint32, targetGUID uint64) {
+	t.Helper()
+	var spellID uint32
+	if err := b.withWorldDB(t).QueryRow(`SELECT spellid_1 FROM item_template WHERE entry=?`, entry).Scan(&spellID); err != nil {
+		HarnessFailf(t, "item_template %d: %v", entry, err)
+	}
+	b.Session.ArmAllWaiters()
+	b.Session.DrainItemPushes()
+	MustGM(t, b.World, fmt.Sprintf(".additem %d 1", entry))
+	push, err := b.Session.WaitItemPushEntry(entry, 5*time.Second)
+	if err != nil {
+		Preconditionf(t, "no SMSG_ITEM_PUSH_RESULT for item %d: %v", entry, err)
+	}
+	if push.BagSlot != 255 || push.ItemSlot < 23 || push.ItemSlot > 38 {
+		Preconditionf(t, "item %d pushed to bag %d slot %d; only backpack slots are supported", entry, push.BagSlot, push.ItemSlot)
+	}
+	field := uint16(client.PlayerFieldInvSlotHead) + 2*uint16(push.ItemSlot)
+	var itemGUID uint64
+	for deadline := time.Now().Add(5 * time.Second); itemGUID == 0; time.Sleep(100 * time.Millisecond) {
+		itemGUID = b.World.GetObject(b.World.CharGUID()).GUIDField(field)
+		if itemGUID == 0 && time.Now().After(deadline) {
+			Preconditionf(t, "no item GUID in inventory slot %d for item %d", push.ItemSlot, entry)
+		}
+	}
+	if err := b.World.UseItem(255, uint8(push.ItemSlot), spellID, itemGUID, targetGUID); err != nil {
+		HarnessFailf(t, "CMSG_USE_ITEM entry=%d: %v", entry, err)
+	}
 }

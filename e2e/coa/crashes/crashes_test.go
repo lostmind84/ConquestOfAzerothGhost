@@ -67,35 +67,10 @@ func TestCrash_ShadowEffigyNearEnemy(t *testing.T) {
 // Spell::SelectImplicitTargetObjectTargets when its explicit target is gone.
 // Level 1 enemies die to the main-hand strike, so the off-hand helper fires at dying units.
 func TestCrash_BarbaricWhirlKillingBlow(t *testing.T) {
-	const (
-		classBarbarian     uint8  = 12
-		spellDualWield     uint32 = 674
-		spellBarbaricWhirl uint32 = 500002 // learned at level 14
-		spellWhirlOffhand  uint32 = 805232
-		itemStoneCutter    uint32 = 629997 // starting two-handed weapon
-		itemHandAxe        uint32 = 2134
-		enemiesPerRound           = 4
-		rounds                    = 5
-	)
-	bot := e2eharness.NewSolo(t, e2eharness.ScenarioOpts{Prefix: "Whirl", Race: e2eharness.RaceOrc, Class: classBarbarian, Level: 20})
-	bot.TeleportPad(t, e2eharness.PackagePad(t))
-	bot.Learn(t, spellDualWield)
-	bot.Learn(t, spellBarbaricWhirl)
-	bot.GM(t, fmt.Sprintf(".additem %d -1", itemStoneCutter)) // free both hands
-	time.Sleep(500 * time.Millisecond)
-	bot.EquipEntry(t, itemHandAxe, 1) // main hand
-	bot.EquipEntry(t, itemHandAxe, 1) // off hand
-	if bot.VisibleItemEntry(16) != itemHandAxe {
-		t.Fatalf("precondition: off hand holds %d, want %d", bot.VisibleItemEntry(16), itemHandAxe)
-	}
-	bot.CheatPower(t)
-
-	// The client receives no SMSG_SPELL_GO for the triggered helper; its damage log proves it fired.
-	var offhandHits atomic.Int32
-	defer countDamageLogs(bot, spellWhirlOffhand, &offhandHits)()
-
-	for round := 1; round <= rounds; round++ {
-		for i := 0; i < enemiesPerRound; i++ {
+	bot, offhandHits, cancel := barbaricWhirlBot(t, "Whirl")
+	defer cancel()
+	for round := 1; round <= barbaricWhirlRounds; round++ {
+		for i := 0; i < barbaricWhirlEnemies; i++ {
 			guid := bot.Spawn(t, CreatureHarvestGolem, 10*time.Second)
 			_ = bot.World.SetTarget(guid)
 			bot.GM(t, ".npc set level 1")
@@ -109,6 +84,111 @@ func TestCrash_BarbaricWhirlKillingBlow(t *testing.T) {
 	}
 	if offhandHits.Load() == 0 {
 		t.Errorf("precondition: the off-hand helper never hit; the crash path was not exercised")
+	}
+}
+
+const (
+	spellBarbaricWhirl   uint32 = 500002 // learned at level 14
+	spellWhirlOffhand    uint32 = 805232
+	barbaricWhirlEnemies        = 4
+	barbaricWhirlRounds         = 5
+)
+
+// barbaricWhirlBot builds a level 20 dual-wielding Barbarian that knows Barbaric Whirl and counts the
+// off-hand helper's hits. The client receives no SMSG_SPELL_GO for the triggered helper; its damage
+// log proves it fired.
+func barbaricWhirlBot(t *testing.T, prefix string) (*e2eharness.ScenarioBot, *atomic.Int32, func()) {
+	t.Helper()
+	const (
+		classBarbarian  uint8  = 12
+		spellDualWield  uint32 = 674
+		itemStoneCutter uint32 = 629997 // starting two-handed weapon
+		itemHandAxe     uint32 = 2134
+	)
+	bot := e2eharness.NewSolo(t, e2eharness.ScenarioOpts{Prefix: prefix, Race: e2eharness.RaceOrc, Class: classBarbarian, Level: 20})
+	bot.TeleportPad(t, e2eharness.PackagePad(t))
+	bot.Learn(t, spellDualWield)
+	bot.Learn(t, spellBarbaricWhirl)
+	bot.GM(t, fmt.Sprintf(".additem %d -1", itemStoneCutter)) // free both hands
+	time.Sleep(500 * time.Millisecond)
+	bot.EquipEntry(t, itemHandAxe, 1) // main hand
+	bot.EquipEntry(t, itemHandAxe, 1) // off hand
+	if bot.VisibleItemEntry(16) != itemHandAxe {
+		t.Fatalf("precondition: off hand holds %d, want %d", bot.VisibleItemEntry(16), itemHandAxe)
+	}
+	bot.CheatPower(t)
+	var offhandHits atomic.Int32
+	return bot, &offhandHits, countDamageLogs(bot, spellWhirlOffhand, &offhandHits)
+}
+
+// Main project issue #265, Barbaric Whirl variant: the assert needs the helper's explicit target to
+// be gone from the map. Temporary spawns (`.npc add temp`) despawn their corpse at death, so the
+// main-hand strike removes the target before the off-hand helper selects it.
+func TestCrash_BarbaricWhirlTargetDespawns(t *testing.T) {
+	bot, offhandHits, cancel := barbaricWhirlBot(t, "WhirD")
+	defer cancel()
+	spawned := map[uint64]struct{}{}
+	despawned := 0
+	// Temporary spawns are not removed by the spawn cleanup and would stay on the pad for later tests.
+	defer func() {
+		var survivors []uint64
+		for _, u := range bot.UnitsByEntry(120, CreatureHarvestGolem) {
+			if _, ok := spawned[u.GUID]; ok && u.Health > 0 {
+				survivors = append(survivors, u.GUID)
+			}
+		}
+		if len(survivors) > 0 {
+			bot.DamageKill(t, survivors, 10000, 10*time.Second)
+		}
+	}()
+	for round := 1; round <= barbaricWhirlRounds; round++ {
+		known := map[uint64]struct{}{}
+		for _, u := range bot.UnitsByEntry(120, CreatureHarvestGolem) {
+			known[u.GUID] = struct{}{}
+		}
+		for i := 0; i < barbaricWhirlEnemies; i++ {
+			bot.GM(t, fmt.Sprintf(".npc add temp %d", CreatureHarvestGolem))
+		}
+		for _, u := range bot.WaitNewUnits(t, known, []uint32{CreatureHarvestGolem}, 5*time.Second) {
+			spawned[u.GUID] = struct{}{}
+			_ = bot.World.SetTarget(u.GUID)
+			bot.GM(t, ".npc set level 1")
+		}
+		time.Sleep(500 * time.Millisecond)
+		// Leave half the targets a few health points so the main-hand strike kills them; the others
+		// survive it, so the off-hand helper still lands hits that prove it fires.
+		weakened := 0
+		for _, u := range bot.UnitsByEntry(120, CreatureHarvestGolem) {
+			if _, ok := spawned[u.GUID]; ok && u.Health > 3 && weakened < barbaricWhirlEnemies/2 {
+				bot.Damage(t, u.GUID, u.Health-3)
+				weakened++
+			}
+		}
+		_ = bot.World.SetTarget(bot.World.CharGUID())
+		bot.GM(t, ".cooldown") // temporary spawns appear faster than Barbaric Whirl's cooldown
+		bot.CombatReady(t)
+		bot.CastMust(t, spellBarbaricWhirl, 0, 5*time.Second)
+		time.Sleep(settleDelay)
+		e2eharness.ProbeWorldAlive(t, bot, 265)
+		alive := map[uint64]uint32{}
+		for _, u := range bot.UnitsByEntry(120, CreatureHarvestGolem) {
+			alive[u.GUID] = u.Health
+		}
+		for guid := range spawned {
+			if _, ok := alive[guid]; !ok {
+				despawned++
+				delete(spawned, guid)
+			}
+		}
+		t.Logf("round %d: %d target(s) left the map so far, %d golem(s) alive", round, despawned, len(alive))
+		bot.GM(t, ".gm on")
+		time.Sleep(time.Second)
+	}
+	if offhandHits.Load() == 0 {
+		t.Errorf("precondition: the off-hand helper never hit; the crash path was not exercised")
+	}
+	if despawned == 0 {
+		t.Errorf("precondition: no target left the map; the crash path was not exercised")
 	}
 }
 
