@@ -39,7 +39,7 @@ func IsHighValueTraceOpcode(op uint16) bool {
 		CmsgSetSelection, CmsgSetSheathed:
 		return true
 	// Spells / auras (CmsgCancelAura is 0x136; SmsgSpellFailure is 0x133)
-	case CmsgCastSpell, CmsgCancelCast, CmsgCancelAura,
+	case CmsgCastSpell, CmsgUseItem, CmsgCancelCast, CmsgCancelAura,
 		SmsgCastFailed, SmsgSpellStart, SmsgSpellGo, SmsgSpellFailure,
 		SmsgSpellCooldown, SmsgCooldownEvent, SmsgClearCooldown,
 		SmsgInitialSpells, SmsgLearnedSpell, SmsgSupercededSpell, SmsgRemovedSpell,
@@ -146,6 +146,7 @@ var opcodeNames = map[uint16]string{
 	SmsgAttackSwingCantAttack:           "SMSG_ATTACKSWING_CANT_ATTACK",
 	SmsgAttackerStateUpdate:             "SMSG_ATTACKERSTATEUPDATE",
 	CmsgCastSpell:                       "CMSG_CAST_SPELL",
+	CmsgUseItem:                         "CMSG_USE_ITEM",
 	SmsgSpellStart:                      "SMSG_SPELL_START",
 	SmsgSpellGo:                         "SMSG_SPELL_GO",
 	SmsgSpellFailure:                    "SMSG_SPELL_FAILURE",

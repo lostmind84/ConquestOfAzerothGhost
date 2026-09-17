@@ -768,3 +768,32 @@ func findUnitSummonedBy(w *client.WorldClient, ownerGUID uint64, maxDist float32
 	}
 	return 0
 }
+
+// UseItemEntry sends CMSG_USE_ITEM for the first stack of entry in this bot's inventory (read
+// from CharDB after Save) with the item's first spell. targetGUID 0 targets self.
+func (b *ScenarioBot) UseItemEntry(t *testing.T, entry uint32, targetGUID uint64) {
+	t.Helper()
+	const highGuidItem = uint64(0x4000) << 48
+	b.Save(t)
+	var bag, slot uint8
+	var itemLow uint64
+	var spellID uint32
+	err := b.CharDB.QueryRow(`
+		SELECT ci.bag, ci.slot, ci.item
+		FROM character_inventory ci
+		INNER JOIN item_instance ii ON ii.guid = ci.item
+		WHERE ci.guid=? AND ii.itemEntry=?
+		ORDER BY ci.bag, ci.slot LIMIT 1`, b.GUID, entry).Scan(&bag, &slot, &itemLow)
+	if err != nil {
+		Preconditionf(t, "item %d not in inventory: %v", entry, err)
+	}
+	if bag != 0 {
+		Preconditionf(t, "item %d is in bag guid %d; only backpack slots are supported", entry, bag)
+	}
+	if err := b.withWorldDB(t).QueryRow(`SELECT spellid_1 FROM item_template WHERE entry=?`, entry).Scan(&spellID); err != nil {
+		HarnessFailf(t, "item_template %d: %v", entry, err)
+	}
+	if err := b.World.UseItem(255, slot, spellID, highGuidItem|itemLow, targetGUID); err != nil {
+		HarnessFailf(t, "CMSG_USE_ITEM entry=%d: %v", entry, err)
+	}
+}

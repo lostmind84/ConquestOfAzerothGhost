@@ -150,6 +150,7 @@ const (
 
 	// Item / inventory opcodes
 	CmsgAutoequipItem uint16 = 0x010A
+	CmsgUseItem       uint16 = 0x00AB
 
 	// Quest opcodes
 	CmsgQuestgiverHello         uint16 = 0x0184
@@ -2665,6 +2666,27 @@ func (w *WorldClient) CastSpell(spellID uint32, targetGUID uint64) error {
 	}
 
 	return w.sendPacket(CmsgCastSpell, buf.Bytes())
+}
+
+// UseItem sends CMSG_USE_ITEM for the item at bag/slot (bag=255 is the backpack). The server
+// checks itemGUID against the item at that position; spellID is one of the item's spells.
+// targetGUID 0 sends a self target.
+func (w *WorldClient) UseItem(bag, slot uint8, spellID uint32, itemGUID, targetGUID uint64) error {
+	buf := new(bytes.Buffer)
+	buf.WriteByte(bag)
+	buf.WriteByte(slot)
+	buf.WriteByte(0) // castCount
+	binary.Write(buf, binary.LittleEndian, spellID)
+	binary.Write(buf, binary.LittleEndian, itemGUID)
+	binary.Write(buf, binary.LittleEndian, uint32(0)) // glyphIndex
+	buf.WriteByte(0)                                  // castFlags
+	if targetGUID != 0 {
+		binary.Write(buf, binary.LittleEndian, uint32(0x0002)) // TARGET_FLAG_UNIT
+		writePackedGUID(buf, targetGUID)
+	} else {
+		binary.Write(buf, binary.LittleEndian, uint32(0x0000)) // TARGET_FLAG_SELF
+	}
+	return w.sendPacket(CmsgUseItem, buf.Bytes())
 }
 
 // AutoEquipItem sends CMSG_AUTOEQUIP_ITEM for a bag/slot inventory location.

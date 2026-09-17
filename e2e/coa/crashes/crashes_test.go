@@ -67,17 +67,45 @@ func TestCrash_ShadowEffigyNearEnemy(t *testing.T) {
 // Spell::SelectImplicitTargetObjectTargets when its explicit target is gone.
 // Level 1 enemies die to the main-hand strike, so the off-hand helper fires at dying units.
 func TestCrash_BarbaricWhirlKillingBlow(t *testing.T) {
+	bot, offhandHits, cancel := barbaricWhirlBot(t, "Whirl")
+	defer cancel()
+	for round := 1; round <= barbaricWhirlRounds; round++ {
+		for i := 0; i < barbaricWhirlEnemies; i++ {
+			guid := bot.Spawn(t, CreatureHarvestGolem, 10*time.Second)
+			_ = bot.World.SetTarget(guid)
+			bot.GM(t, ".npc set level 1")
+		}
+		bot.CombatReady(t)
+		bot.CastMust(t, spellBarbaricWhirl, 0, 5*time.Second)
+		time.Sleep(settleDelay)
+		e2eharness.ProbeWorldAlive(t, bot, 265)
+		bot.GM(t, ".gm on")
+		time.Sleep(time.Second)
+	}
+	if offhandHits.Load() == 0 {
+		t.Errorf("precondition: the off-hand helper never hit; the crash path was not exercised")
+	}
+}
+
+const (
+	spellBarbaricWhirl   uint32 = 500002 // learned at level 14
+	spellWhirlOffhand    uint32 = 805232
+	barbaricWhirlEnemies        = 4
+	barbaricWhirlRounds         = 5
+)
+
+// barbaricWhirlBot builds a level 20 dual-wielding Barbarian that knows Barbaric Whirl and counts the
+// off-hand helper's hits. The client receives no SMSG_SPELL_GO for the triggered helper; its damage
+// log proves it fired.
+func barbaricWhirlBot(t *testing.T, prefix string) (*e2eharness.ScenarioBot, *atomic.Int32, func()) {
+	t.Helper()
 	const (
-		classBarbarian     uint8  = 12
-		spellDualWield     uint32 = 674
-		spellBarbaricWhirl uint32 = 500002 // learned at level 14
-		spellWhirlOffhand  uint32 = 805232
-		itemStoneCutter    uint32 = 629997 // starting two-handed weapon
-		itemHandAxe        uint32 = 2134
-		enemiesPerRound           = 4
-		rounds                    = 5
+		classBarbarian  uint8  = 12
+		spellDualWield  uint32 = 674
+		itemStoneCutter uint32 = 629997 // starting two-handed weapon
+		itemHandAxe     uint32 = 2134
 	)
-	bot := e2eharness.NewSolo(t, e2eharness.ScenarioOpts{Prefix: "Whirl", Race: e2eharness.RaceOrc, Class: classBarbarian, Level: 20})
+	bot := e2eharness.NewSolo(t, e2eharness.ScenarioOpts{Prefix: prefix, Race: e2eharness.RaceOrc, Class: classBarbarian, Level: 20})
 	bot.TeleportPad(t, e2eharness.PackagePad(t))
 	bot.Learn(t, spellDualWield)
 	bot.Learn(t, spellBarbaricWhirl)
@@ -89,17 +117,30 @@ func TestCrash_BarbaricWhirlKillingBlow(t *testing.T) {
 		t.Fatalf("precondition: off hand holds %d, want %d", bot.VisibleItemEntry(16), itemHandAxe)
 	}
 	bot.CheatPower(t)
-
-	// The client receives no SMSG_SPELL_GO for the triggered helper; its damage log proves it fired.
 	var offhandHits atomic.Int32
-	defer countDamageLogs(bot, spellWhirlOffhand, &offhandHits)()
+	return bot, &offhandHits, countDamageLogs(bot, spellWhirlOffhand, &offhandHits)
+}
 
-	for round := 1; round <= rounds; round++ {
-		for i := 0; i < enemiesPerRound; i++ {
-			guid := bot.Spawn(t, CreatureHarvestGolem, 10*time.Second)
-			_ = bot.World.SetTarget(guid)
+// Main project issue #265, Barbaric Whirl variant: the assert needs the helper's explicit target to
+// be gone from the map. Temporary spawns (`.npc add temp`) despawn their corpse at death, so the
+// main-hand strike removes the target before the off-hand helper selects it.
+func TestCrash_BarbaricWhirlTargetDespawns(t *testing.T) {
+	bot, offhandHits, cancel := barbaricWhirlBot(t, "WhirD")
+	defer cancel()
+	for round := 1; round <= barbaricWhirlRounds; round++ {
+		known := map[uint64]struct{}{}
+		for _, u := range bot.UnitsByEntry(120, CreatureHarvestGolem) {
+			known[u.GUID] = struct{}{}
+		}
+		for i := 0; i < barbaricWhirlEnemies; i++ {
+			bot.GM(t, fmt.Sprintf(".npc add temp %d", CreatureHarvestGolem))
+		}
+		for _, u := range bot.WaitNewUnits(t, known, []uint32{CreatureHarvestGolem}, 5*time.Second) {
+			_ = bot.World.SetTarget(u.GUID)
 			bot.GM(t, ".npc set level 1")
 		}
+		_ = bot.World.SetTarget(bot.World.CharGUID())
+		bot.GM(t, ".cooldown") // temporary spawns appear faster than Barbaric Whirl's cooldown
 		bot.CombatReady(t)
 		bot.CastMust(t, spellBarbaricWhirl, 0, 5*time.Second)
 		time.Sleep(settleDelay)

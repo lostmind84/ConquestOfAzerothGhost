@@ -205,7 +205,7 @@ func (w *WorldClient) removePhaseWaiter(ch chan SessionPhase) {
 // requiresInWorldGameplay is true for opcodes AC will STATUS-drop outside in-world.
 func requiresInWorldGameplay(opcode uint16) bool {
 	switch opcode {
-	case CmsgAttackSwing, CmsgAttackStop, CmsgCastSpell, CmsgCancelCast,
+	case CmsgAttackSwing, CmsgAttackStop, CmsgCastSpell, CmsgUseItem, CmsgCancelCast,
 		CmsgSetSelection, CmsgSetSheathed, CmsgLoot, CmsgLootRelease,
 		MsgMoveStartForward, MsgMoveStop, MsgMoveHeartbeat, MsgMoveSetFacing,
 		MsgMoveJump, MsgMoveFallLand,
