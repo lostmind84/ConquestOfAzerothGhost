@@ -344,6 +344,9 @@ const (
 	// UNIT_END = OBJECT_END + 0x008E = 0x94 (3.3.5a)
 	// PLAYER_FIELD_COINAGE = UNIT_END + 0x03FE
 	PlayerFieldCoinage = 0x0492
+	// PLAYER_FIELD_INV_SLOT_HEAD = UNIT_END + 0x00B0: one item GUID (2 uint32s) per inventory slot,
+	// equipment first, then bags and backpack slots 23..38. Sent to the owner only.
+	PlayerFieldInvSlotHead = 0x0144
 	// PLAYER_XP = UNIT_END + 0x01E6 (experience within the current level)
 	PlayerXP = 0x027A
 	// PLAYER_NEXT_LEVEL_XP = UNIT_END + 0x01E7
