@@ -53,9 +53,12 @@ func TestCoA_XPRates(t *testing.T) {
 		{"Rate.XP.Kill (creature kill)", base.kill, scaled.kill},
 		{"Rate.XP.Quest (quest reward)", base.quest, scaled.quest},
 	} {
-		if c.scaled != 10*c.base {
-			t.Errorf("E2E_FAIL: %s: %d XP at rate 1, %d XP at rate 10, want %d",
-				c.name, c.base, c.scaled, 10*c.base)
+		// Kill experience is rated before SPELL_AURA_MOD_XP_PCT (the default PvE ruleset's War Mode marker gives
+		// +15%) and truncated to an integer after it, so the rate 10 value can exceed ten times the rate 1 value
+		// by up to 9.
+		if c.scaled < 10*c.base || c.scaled >= 10*c.base+10 {
+			t.Errorf("E2E_FAIL: %s: %d XP at rate 1, %d XP at rate 10, want %d to %d",
+				c.name, c.base, c.scaled, 10*c.base, 10*c.base+9)
 			continue
 		}
 		t.Logf("E2E_PASS: %s: %d XP at rate 1, %d XP at rate 10", c.name, c.base, c.scaled)
