@@ -238,7 +238,79 @@ const (
 	labPassword = "labarba"
 	labChar     = "Labarba"
 	labLevel    = 60
+
+	// Known-good ground on map 0 (Eastern Kingdoms): the default Human character login/spawn position in Northshire
+	// Valley, western Elwynn Forest. Observed directly, not guessed — every RaceHuman bot's very first login in
+	// this package reports "Login verified map=0 pos=(-8950.0,-132.5,83.5)" before any teleport, e.g.
+	// TestWitchHunter_ArbalestMasteryAuraPlacement's own login line above. Real players spawn here, so it is
+	// guaranteed to have actual terrain — unlike the harness's Hyjal test pad used by the other test in this file:
+	// that pad is a floating platform built for headless Ghost bots, which have no physics and never notice there
+	// is nothing underneath. A real client standing there falls and dies (confirmed against labarba).
+	labMapID   uint32  = 0
+	labAnchorX float32 = -8950.0
+	labAnchorY float32 = -132.5
+	labAnchorZ float32 = 83.5
 )
+
+// groundSnapMove sends `.go xyz X Y` (exactly 2 numeric args, no Z, no map) so the server computes real ground
+// height at (x, y) on the bot's *current* map via Map::GetHeight. Confirmed in the server source
+// (src/server/scripts/Commands/cs_go.cpp, HandleGoXYZCommand): Z is only auto-computed when the command omits it
+// (fewer than 3 numbers in the args); `.go xyz X Y Z MAP` — what bot.Teleport/backOffFromTarget send — takes Z
+// verbatim with no terrain check at all. That is exactly how labarba ended up standing over open air on the Hyjal
+// pad: its Z came from a teleport that inherited a neighboring position's Z rather than asking the server for
+// ground height. Only usable when the bot is already on the target map (a same-map move).
+func groundSnapMove(t *testing.T, bot *e2eharness.ScenarioBot, x, y float32) (z float32) {
+	t.Helper()
+	bot.GM(t, fmt.Sprintf(".go xyz %.2f %.2f", x, y))
+	time.Sleep(settle)
+	_, _, gz, _ := bot.Pos()
+	return gz
+}
+
+// groundSnapBackOff moves the bot to ~yards from targetGUID's current position using groundSnapMove, trying a few
+// directions and keeping whichever lands closest in height to the target. A big height jump usually means a
+// rooftop or cliff edge rather than the same open ground the target is standing on, even though Map::GetHeight
+// always returns *some* real surface (so, unlike the Hyjal-pad bug, nothing here can land over open air).
+func groundSnapBackOff(t *testing.T, bot *e2eharness.ScenarioBot, targetGUID uint64, yards float32) (finalDist, zDelta float64) {
+	t.Helper()
+	obj := bot.World.GetObject(targetGUID)
+	if obj == nil {
+		t.Fatalf("precondition: target %d not tracked", targetGUID)
+	}
+	tx, ty, tz := obj.InterpolatedPosition()
+
+	type offset struct{ dx, dy float32 }
+	diag := yards * 0.70710678
+	offsets := []offset{
+		{yards, 0}, {-yards, 0}, {0, yards}, {0, -yards},
+		{diag, diag}, {-diag, -diag}, {diag, -diag}, {-diag, diag},
+	}
+
+	const acceptDelta = 5.0 // yards; close enough to be "the same open ground", not a roof or cliff
+	bestDelta := math.MaxFloat64
+	var bestX, bestY float32
+	for _, o := range offsets {
+		nx, ny := tx+o.dx, ty+o.dy
+		gz := groundSnapMove(t, bot, nx, ny)
+		delta := math.Abs(float64(gz - tz))
+		t.Logf("ground-snap candidate dx=%.1f dy=%.1f -> ground z=%.1f (target z=%.1f, delta=%.1f yd)",
+			o.dx, o.dy, gz, tz, delta)
+		if delta < bestDelta {
+			bestDelta, bestX, bestY = delta, nx, ny
+		}
+		if delta <= acceptDelta {
+			break
+		}
+	}
+	if bestDelta > acceptDelta {
+		t.Logf("WARNING: no direction landed within %.0f yd of the target's height; using the closest found "+
+			"(delta %.1f yd)", acceptDelta, bestDelta)
+		groundSnapMove(t, bot, bestX, bestY)
+	}
+	bot.Face(t, targetGUID)
+	fx, fy, fz, _ := bot.Pos()
+	return math.Hypot(float64(fx-tx), float64(fy-ty)), math.Abs(float64(fz - tz))
+}
 
 // TestArbalestLabSetup prepares the "labarba" account/character so the coa-client-lab game client can look at
 // issue #3935 itself: it applies the exact setup TestWitchHunter_ArbalestMasteryAuraPlacement proved works (crossbow
@@ -286,14 +358,22 @@ func TestArbalestLabSetup(t *testing.T) {
 	}
 	charName := session.Name
 
-	bot.TeleportPad(t, e2eharness.PackagePad(t))
+	// Known-good ground (see the labAnchor* doc comment above), not the harness's Hyjal test pad. 4 numeric args
+	// (x y z map): the map is changing here, so Z must be given explicitly — labAnchorZ is itself proven-good, not
+	// reused from an unrelated position the way the previous (broken) version of this test did.
+	bot.GM(t, fmt.Sprintf(".go xyz %.2f %.2f %.2f %d", labAnchorX, labAnchorY, labAnchorZ, labMapID))
+	time.Sleep(settle)
 	e2eharness.EnableGM(t, bot.World)
 	e2eharness.SetLevel(t, bot.World, labLevel) // logs "level set to N" itself
 
 	// Same setup TestWitchHunter_ArbalestMasteryAuraPlacement proved works. No explicit spec selection was needed
 	// there (Arbalest Mastery is a base passive, not talent-gated), so none is done here either.
 	bot.Learn(t, spellProficiencyCrossbows)
-	equip(t, bot, itemMakeshiftCrossbow)
+	if _, equipped := bot.EquippedSlot(itemMakeshiftCrossbow); !equipped {
+		equip(t, bot, itemMakeshiftCrossbow)
+	} else {
+		t.Logf("Makeshift Crossbow (%d) already equipped, skipping .additem", itemMakeshiftCrossbow)
+	}
 	if !bot.World.KnowsSpell(spellArbalestMastery) {
 		bot.Learn(t, spellArbalestMastery)
 	}
@@ -319,26 +399,66 @@ func TestArbalestLabSetup(t *testing.T) {
 	}
 
 	// Persistent (`.npc add`), not the auto-despawned fixture the other test uses: this target must still be there
-	// when the lab client logs in later. Same level and neutral faction as the proven setup.
+	// when the lab client logs in later. The bot has not moved since the anchor .go xyz above, so the creature
+	// spawns on the same proven ground. Same level and neutral faction as the proven setup.
 	thug, spawnID := spawnPersistentNoCleanup(t, bot, creatureDefiasThug, 15*time.Second)
 	bot.GM(t, fmt.Sprintf(".npc set level %d", labLevel))
 	bot.GM(t, ".npc set faction 7")
 
-	// Leave the character ~15 yd from the target: melee range refuses Witchbane with SPELL_FAILED_TOO_CLOSE (see
-	// TestWitchHunter_ArbalestMasteryAuraPlacement's history).
-	dist := backOffFromTarget(t, bot, thug, 15)
-	t.Logf("distance to target before backing off: %.1f yd", dist)
+	// Leave the character ~15 yd from the target using only ground-snapped positions (see groundSnapBackOff) — the
+	// naive Teleport()-with-reused-Z approach the other test uses is exactly what put the character over open air
+	// last time. Melee range itself refuses Witchbane with SPELL_FAILED_TOO_CLOSE (see
+	// TestWitchHunter_ArbalestMasteryAuraPlacement's history), so the character cannot just stay at the anchor.
+	dist, zDelta := groundSnapBackOff(t, bot, thug, 15)
+	t.Logf("distance to target: %.1f yd, height difference from target: %.1f yd", dist, zDelta)
 
 	bot.GM(t, ".gm off") // leave the character in a normal (non-GM-mode) state for the client to pick up
-	bot.Save(t)
+	bot.GM(t, ".combatstop")
 
-	x, y, z, mapID := bot.Pos()
+	// Alive and at full health before handing off. `.revive`'s server-side implementation
+	// (src/server/scripts/Commands/cs_misc.cpp, HandleReviveCommand) resurrects at 100% health for any
+	// non-plain-player account — labarba is GM level 3 — so it is also used here to top off partial health, not
+	// just to resurrect from dead.
+	if bot.World.Health() == 0 {
+		t.Logf("character is dead (hp=0), reviving")
+		bot.GM(t, ".revive")
+		bot.WaitAlive(t, 10*time.Second)
+	}
+	if hp, max := bot.World.Health(), bot.World.MaxHealth(); max > 0 && hp < max {
+		t.Logf("health %d/%d, not full — reviving again to top off", hp, max)
+		bot.GM(t, ".revive")
+		time.Sleep(settle)
+	}
+	hp, maxHP := bot.World.Health(), bot.World.MaxHealth()
+	if hp == 0 {
+		t.Fatalf("E2E_FAIL: character still dead (hp=0/%d) after .revive — cannot hand off to the lab client (#3935)", maxHP)
+	}
+	if hp < maxHP {
+		t.Logf("WARNING: health %d/%d still not full after reviving; the client will see a wounded but alive character", hp, maxHP)
+	}
+
+	// Not falling: a real client falls under actual gravity from a position with no ground under it, which this
+	// Ghost bot (no physics simulation) cannot detect by watching its own Z — that is exactly how the previous
+	// version of this test missed the bug. groundSnapBackOff above only used server-computed ground heights, so
+	// there is nothing to fall from; confirm the position is stable over a short wait anyway as a cheap sanity
+	// check, and log the final numbers the report/client need either way.
+	x1, y1, z1, _ := bot.Pos()
+	time.Sleep(2 * time.Second)
+	x2, y2, z2, mapID := bot.Pos()
+	if math.Hypot(float64(x2-x1), float64(y2-y1)) > 0.5 || math.Abs(float64(z2-z1)) > 0.5 {
+		t.Errorf("E2E_FAIL: position drifted while idle: (%.1f,%.1f,%.1f) -> (%.1f,%.1f,%.1f) map=%d — character may be falling (#3935)",
+			x1, y1, z1, x2, y2, z2, mapID)
+	}
+
+	bot.Save(t)
+	time.Sleep(300 * time.Millisecond)
+
 	t.Logf("E2E_PASS: labarba setup ready for the client")
 	t.Logf("account: %s", labAccount)
 	t.Logf("character: %s", charName)
 	t.Logf("creature: %s (entry %d, live guid 0x%X, db spawn id %d)", creatureName, creatureDefiasThug, thug, spawnID)
 	t.Logf("Witchbane rank to cast: %s", bot.DescribeSpell(provenRank))
-	t.Logf("character position: x=%.1f y=%.1f z=%.1f map=%d", x, y, z, mapID)
+	t.Logf("character position: x=%.1f y=%.1f z=%.1f map=%d, health=%d/%d", x2, y2, z2, mapID, hp, maxHP)
 
 	// Graceful logout (CMSG_LOGOUT_REQUEST), not a raw socket close, so the account is not left "online" and
 	// refuses the lab client's login right after.
@@ -347,4 +467,59 @@ func TestArbalestLabSetup(t *testing.T) {
 		t.Logf("logout wait: %v (continuing with Close)", err)
 	}
 	bot.Close()
+
+	// Verify directly against acore_characters, not just this session's own (possibly stale) view. `online` clears
+	// a little after SMSG_LOGOUT_COMPLETE (session teardown finishes on the next world tick), so poll briefly
+	// instead of reading once immediately after Close — a bare read here raced and misreported online=1 once even
+	// though a login right after (below) worked fine.
+	var dbHealth, dbMap uint32
+	var dbX, dbY, dbZ float32
+	var dbOnline uint8
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := charDB.QueryRow(
+			`SELECT health, position_x, position_y, position_z, map, online FROM characters WHERE name = ?`, charName,
+		).Scan(&dbHealth, &dbX, &dbY, &dbZ, &dbMap, &dbOnline); err != nil {
+			t.Fatalf("post-logout characters row for %s: %v", charName, err)
+		}
+		if dbOnline == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Logf("post-logout DB row: health=%d pos=(%.1f,%.1f,%.1f) map=%d online=%d", dbHealth, dbX, dbY, dbZ, dbMap, dbOnline)
+	if dbHealth == 0 {
+		t.Errorf("E2E_FAIL: character %s saved dead (health=0) in acore_characters after logout (#3935)", charName)
+	}
+	if dbOnline != 0 {
+		t.Errorf("E2E_FAIL: character %s still marked online=%d in acore_characters %.0fs after logout (#3935)",
+			charName, dbOnline, 5.0)
+	}
+	if dbMap != labMapID {
+		t.Errorf("E2E_FAIL: character %s saved on map %d, expected %d (#3935)", charName, dbMap, labMapID)
+	}
+
+	// Second short session: log back in on the same account/character and confirm it is alive and where expected,
+	// closer to what the real client will actually do than reading the DB row alone.
+	verify, err := e2eharness.LoginBot(t, e2eharness.LoginOptions{
+		User: labAccount, Password: labPassword, CharName: charName,
+		Race: e2eharness.RaceHuman, Class: classWitchHunter,
+	})
+	if err != nil {
+		t.Fatalf("verification re-login: %v", err)
+	}
+	verifyBot := &e2eharness.ScenarioBot{Session: verify}
+	t.Cleanup(func() { verifyBot.Close() })
+	time.Sleep(settle) // let self/object data populate after login
+	vx, vy, vz, vmap := verifyBot.Pos()
+	vhp, vmaxHP := verifyBot.World.Health(), verifyBot.World.MaxHealth()
+	t.Logf("verification re-login: hp=%d/%d pos=(%.1f,%.1f,%.1f) map=%d", vhp, vmaxHP, vx, vy, vz, vmap)
+	if vhp == 0 {
+		t.Errorf("E2E_FAIL: verification re-login shows the character dead (hp=0/%d) (#3935)", vmaxHP)
+	}
+	_ = verifyBot.World.SendLogout()
+	if err := verifyBot.World.WaitForLogout(30 * time.Second); err != nil {
+		t.Logf("verification logout wait: %v (continuing with Close)", err)
+	}
+	verifyBot.Close()
 }
