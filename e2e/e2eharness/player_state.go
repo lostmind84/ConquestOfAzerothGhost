@@ -774,16 +774,24 @@ func findUnitSummonedBy(w *client.WorldClient, ownerGUID uint64, maxDist float32
 func (b *ScenarioBot) UseItemEntry(t *testing.T, entry uint32, targetGUID uint64) {
 	t.Helper()
 	const highGuidItem = uint64(0x4000) << 48
-	b.Save(t)
 	var bag, slot uint8
 	var itemLow uint64
 	var spellID uint32
-	err := b.CharDB.QueryRow(`
-		SELECT ci.bag, ci.slot, ci.item
-		FROM character_inventory ci
-		INNER JOIN item_instance ii ON ii.guid = ci.item
-		WHERE ci.guid=? AND ii.itemEntry=?
-		ORDER BY ci.bag, ci.slot LIMIT 1`, b.GUID, entry).Scan(&bag, &slot, &itemLow)
+	var err error
+	// A GM .additem sent just before may not be saved yet: save and query until the row appears.
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		b.Save(t)
+		err = b.CharDB.QueryRow(`
+			SELECT ci.bag, ci.slot, ci.item
+			FROM character_inventory ci
+			INNER JOIN item_instance ii ON ii.guid = ci.item
+			WHERE ci.guid=? AND ii.itemEntry=?
+			ORDER BY ci.bag, ci.slot LIMIT 1`, b.GUID, entry).Scan(&bag, &slot, &itemLow)
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 	if err != nil {
 		Preconditionf(t, "item %d not in inventory: %v", entry, err)
 	}

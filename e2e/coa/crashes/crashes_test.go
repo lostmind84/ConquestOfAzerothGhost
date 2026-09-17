@@ -127,6 +127,20 @@ func barbaricWhirlBot(t *testing.T, prefix string) (*e2eharness.ScenarioBot, *at
 func TestCrash_BarbaricWhirlTargetDespawns(t *testing.T) {
 	bot, offhandHits, cancel := barbaricWhirlBot(t, "WhirD")
 	defer cancel()
+	spawned := map[uint64]struct{}{}
+	despawned := 0
+	// Temporary spawns are not removed by the spawn cleanup and would stay on the pad for later tests.
+	defer func() {
+		var survivors []uint64
+		for _, u := range bot.UnitsByEntry(120, CreatureHarvestGolem) {
+			if _, ok := spawned[u.GUID]; ok && u.Health > 0 {
+				survivors = append(survivors, u.GUID)
+			}
+		}
+		if len(survivors) > 0 {
+			bot.DamageKill(t, survivors, 10000, 10*time.Second)
+		}
+	}()
 	for round := 1; round <= barbaricWhirlRounds; round++ {
 		known := map[uint64]struct{}{}
 		for _, u := range bot.UnitsByEntry(120, CreatureHarvestGolem) {
@@ -136,8 +150,19 @@ func TestCrash_BarbaricWhirlTargetDespawns(t *testing.T) {
 			bot.GM(t, fmt.Sprintf(".npc add temp %d", CreatureHarvestGolem))
 		}
 		for _, u := range bot.WaitNewUnits(t, known, []uint32{CreatureHarvestGolem}, 5*time.Second) {
+			spawned[u.GUID] = struct{}{}
 			_ = bot.World.SetTarget(u.GUID)
 			bot.GM(t, ".npc set level 1")
+		}
+		time.Sleep(500 * time.Millisecond)
+		// Leave half the targets a few health points so the main-hand strike kills them; the others
+		// survive it, so the off-hand helper still lands hits that prove it fires.
+		weakened := 0
+		for _, u := range bot.UnitsByEntry(120, CreatureHarvestGolem) {
+			if _, ok := spawned[u.GUID]; ok && u.Health > 3 && weakened < barbaricWhirlEnemies/2 {
+				bot.Damage(t, u.GUID, u.Health-3)
+				weakened++
+			}
 		}
 		_ = bot.World.SetTarget(bot.World.CharGUID())
 		bot.GM(t, ".cooldown") // temporary spawns appear faster than Barbaric Whirl's cooldown
@@ -145,11 +170,25 @@ func TestCrash_BarbaricWhirlTargetDespawns(t *testing.T) {
 		bot.CastMust(t, spellBarbaricWhirl, 0, 5*time.Second)
 		time.Sleep(settleDelay)
 		e2eharness.ProbeWorldAlive(t, bot, 265)
+		alive := map[uint64]uint32{}
+		for _, u := range bot.UnitsByEntry(120, CreatureHarvestGolem) {
+			alive[u.GUID] = u.Health
+		}
+		for guid := range spawned {
+			if _, ok := alive[guid]; !ok {
+				despawned++
+				delete(spawned, guid)
+			}
+		}
+		t.Logf("round %d: %d target(s) left the map so far, %d golem(s) alive", round, despawned, len(alive))
 		bot.GM(t, ".gm on")
 		time.Sleep(time.Second)
 	}
 	if offhandHits.Load() == 0 {
 		t.Errorf("precondition: the off-hand helper never hit; the crash path was not exercised")
+	}
+	if despawned == 0 {
+		t.Errorf("precondition: no target left the map; the crash path was not exercised")
 	}
 }
 
