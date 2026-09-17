@@ -150,6 +150,7 @@ const (
 
 	// Item / inventory opcodes
 	CmsgAutoequipItem uint16 = 0x010A
+	CmsgSwapInvItem   uint16 = 0x010D
 
 	// Quest opcodes
 	CmsgQuestgiverHello         uint16 = 0x0184
@@ -2665,6 +2666,24 @@ func (w *WorldClient) CastSpell(spellID uint32, targetGUID uint64) error {
 	}
 
 	return w.sendPacket(CmsgCastSpell, buf.Bytes())
+}
+
+// CastSpellOnItem sends CMSG_CAST_SPELL targeting one of the player's items (TARGET_FLAG_ITEM), as the client
+// does for temporary weapon and shield enchantments.
+func (w *WorldClient) CastSpellOnItem(spellID uint32, itemGUID uint64) error {
+	buf := new(bytes.Buffer)
+	buf.WriteByte(0) // castCount
+	binary.Write(buf, binary.LittleEndian, spellID)
+	buf.WriteByte(0)                                       // castFlags
+	binary.Write(buf, binary.LittleEndian, uint32(0x0010)) // TARGET_FLAG_ITEM
+	writePackedGUID(buf, itemGUID)
+	return w.sendPacket(CmsgCastSpell, buf.Bytes())
+}
+
+// SwapInvItem sends CMSG_SWAP_INV_ITEM to swap two slots of the player's own inventory (equipment 0..18,
+// backpack 23..38 on 3.3.5a).
+func (w *WorldClient) SwapInvItem(srcSlot, dstSlot uint8) error {
+	return w.sendPacket(CmsgSwapInvItem, []byte{srcSlot, dstSlot})
 }
 
 // AutoEquipItem sends CMSG_AUTOEQUIP_ITEM for a bag/slot inventory location.
