@@ -3,11 +3,14 @@
 package questsworld_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/azerothcore/AzerothGhost/client"
 	"github.com/azerothcore/AzerothGhost/e2e/e2eharness"
 )
 
@@ -527,4 +530,134 @@ func TestSpawn_ScarletMonasteryGraveyardRares(t *testing.T) {
 		t.Fatalf("E2E_FAIL: %d of %d Graveyard rare spawns are empty in a new instance (#1514)", missing, len(spawns))
 	}
 	t.Logf("E2E_PASS: every Graveyard rare spawn is filled in a new instance (#1514)")
+}
+
+// Main project issue #350: quest items do not always drop. Red Burlap Bandana (752) from Defias Thug (38) for
+// Brotherhood of Thieves (18) drops every time on Ascension (db.exil.es export of 2026-09-13).
+//
+//	go test -tags=e2e ./e2e/coa/questsworld -run RedBurlapBandana -count=1 -v
+func TestLoot_RedBurlapBandanaAlwaysDrops(t *testing.T) {
+	const (
+		defiasThug uint32 = 38
+		bandana    uint32 = 752
+		quest      uint32 = 18
+		kills             = 8
+	)
+	bot := newBot(t, "LtBand", e2eharness.RaceHuman, 1, 5)
+	bot.GM(t, fmt.Sprintf(".quest add %d", quest))
+	bot.FlushWorld(t)
+	x, y, z, m := bot.Pos()
+	drops := 0
+	for i := 0; i < kills; i++ {
+		bot.Teleport(t, x, y, z, m)
+		guid := bot.SpawnKillLootable(t, defiasThug, 45*time.Second)
+		items, _ := bot.TryOpenLoot(t, guid, 3*time.Second)
+		for _, item := range items {
+			if item.ItemID == bandana {
+				drops++
+				break
+			}
+		}
+		bot.LootRelease(t, guid)
+	}
+	t.Logf("Red Burlap Bandana dropped %d times in %d kills with the quest active", drops, kills)
+	if drops != kills {
+		t.Fatalf("E2E_FAIL: Red Burlap Bandana dropped %d of %d times (#350)", drops, kills)
+	}
+	t.Logf("E2E_PASS: Red Burlap Bandana dropped on every kill (#350)")
+}
+
+// Main project issue #1515: the Scarlet Monastery outside guards are not elite on this server.
+// Scarlet Scout, Preserver and Sentry are rank 1 (elite) on Ascension (db.exil.es export of 2026-09-13).
+//
+//	go test -tags=e2e ./e2e/coa/questsworld -run ScarletOutsideElites -count=1 -v
+func TestCreature_ScarletOutsideElites(t *testing.T) {
+	bot := newBot(t, "CrScar", e2eharness.RaceUndead, 1, 30)
+	ranks := map[uint32]uint32{}
+	var mu sync.Mutex
+	cancel := bot.World.AddPacketHook(func(opcode uint16, data []byte) {
+		if opcode != client.SmsgCreatureQueryResponse || len(data) < 4 {
+			return
+		}
+		r := bytes.NewReader(data)
+		var entry uint32
+		_ = binary.Read(r, binary.LittleEndian, &entry)
+		for i := 0; i < 6; i++ { // name, three unused names, subname, icon name
+			cString(r)
+		}
+		var typeFlags, creatureType, family, rank uint32
+		_ = binary.Read(r, binary.LittleEndian, &typeFlags)
+		_ = binary.Read(r, binary.LittleEndian, &creatureType)
+		_ = binary.Read(r, binary.LittleEndian, &family)
+		if binary.Read(r, binary.LittleEndian, &rank) == nil {
+			mu.Lock()
+			ranks[entry] = rank
+			mu.Unlock()
+		}
+	})
+	defer cancel()
+	names := map[uint32]string{4280: "Scarlet Preserver", 4281: "Scarlet Scout", 4283: "Scarlet Sentry"}
+	for entry := range names {
+		if err := bot.World.CreatureQuery(entry, 0); err != nil {
+			t.Fatalf("creature query: %v", err)
+		}
+	}
+	time.Sleep(2 * settle)
+	mu.Lock()
+	defer mu.Unlock()
+	failed := false
+	for entry, name := range names {
+		rank, ok := ranks[entry]
+		t.Logf("%s (%d): rank %d (answered %v)", name, entry, rank, ok)
+		if !ok {
+			t.Fatalf("precondition: no creature query answer for %d", entry)
+		}
+		if rank != 1 {
+			failed = true
+		}
+	}
+	if failed {
+		t.Fatalf("E2E_FAIL: the Scarlet Monastery outside guards are not all elite (#1515)")
+	}
+	t.Logf("E2E_PASS: Scarlet Preserver, Scout and Sentry are elite (#1515)")
+}
+
+// Main project issue #1400: Watch Commander Zalaphil, a rare, drops only white items. Its loot, shared with the
+// Durotar rares Warlord Kolkanis and Geolord Mottle, drew one table among two white tables and one green table.
+// Each kill should give a green (quality 2) item.
+//
+//	go test -tags=e2e ./e2e/coa/questsworld -run DurotarRaresGreen -count=1 -v
+func TestLoot_DurotarRaresGreen(t *testing.T) {
+	const kills = 4
+	bot := newBot(t, "LtRare", e2eharness.RaceOrc, 1, 10)
+	db, err := e2eharness.OpenWorldDB()
+	if err != nil {
+		t.Fatalf("world db: %v", err)
+	}
+	defer db.Close()
+	x, y, z, m := bot.Pos()
+	for _, rare := range []struct {
+		entry uint32
+		name  string
+	}{{5809, "Watch Commander Zalaphil"}, {5808, "Warlord Kolkanis"}, {5826, "Geolord Mottle"}} {
+		green := 0
+		for i := 0; i < kills; i++ {
+			bot.Teleport(t, x, y, z, m)
+			guid := bot.SpawnKillLootable(t, rare.entry, 45*time.Second)
+			items, _ := bot.TryOpenLoot(t, guid, 3*time.Second)
+			for _, item := range items {
+				var quality int
+				if db.QueryRow("SELECT Quality FROM item_template WHERE entry = ?", item.ItemID).Scan(&quality) == nil &&
+					quality == 2 {
+					green++
+					break
+				}
+			}
+			bot.LootRelease(t, guid)
+		}
+		t.Logf("%s: a green item in %d of %d kills", rare.name, green, kills)
+		if green != kills {
+			t.Errorf("E2E_FAIL: %s gave a green item in %d of %d kills (#1400)", rare.name, green, kills)
+		}
+	}
 }
