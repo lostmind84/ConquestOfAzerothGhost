@@ -560,3 +560,92 @@ func TestKnownEntriesUploadSelectsOneSpecialization(t *testing.T) {
 		t.Logf("E2E_PASS: two-specialization upload refused (%q); single-specialization upload selected 55", txt)
 	}
 }
+
+// TestTalentBridgeMessageIsSent covers the ASC_LOCAL_CAD bridge (server PR #4027, format from #4030): after a
+// talent change the server whispers the character its active specialization and its held entry ranks on the
+// addon channel, so the patch-B local layer can trust the server instead of its SavedVariable and spellbook.
+// captureChatDuring replaces the tab after the prefix with a space.
+func TestTalentBridgeMessageIsSent(t *testing.T) {
+	bot := newBot(t, "TAut7", e2eharness.RaceOrc, classReaper, 12)
+	bot.SetSpecialization(t, specReaper, spellReaperAutoSpec56)
+
+	txt := captureChatDuring(t, bot, func() { bot.SetTalentRank(t, entryReaperClassA, 1) })
+	if !waitSpell(bot, spellReaperClassA, 5*time.Second) {
+		t.Fatalf("precondition: .localtalent %d 1 did not grant spell %d", entryReaperClassA, spellReaperClassA)
+	}
+	header := fmt.Sprintf("ASC_LOCAL_CAD 1:%d:1:1:", specReaper)
+	paid := fmt.Sprintf("%d,1", entryReaperClassA)
+	automatic := fmt.Sprintf("%d,1", entryReaperAutoSpec56)
+	if !strings.Contains(txt, header) || !strings.Contains(txt, paid) || !strings.Contains(txt, automatic) {
+		t.Errorf("E2E_FAIL: bridge message after .localtalent = %q, want %q with %q and %q (#3971)", txt, header,
+			paid, automatic)
+	} else {
+		t.Logf("E2E_PASS: ASC_LOCAL_CAD carried specialization %d, paid entry %d and automatic entry %d",
+			specReaper, entryReaperClassA, entryReaperAutoSpec56)
+	}
+
+	// The three-message form the other client half reads travels with it: the specialization, the record
+	// flags and the paid ranks only.
+	spec := fmt.Sprintf("ASC_LOCAL_SPEC %d", specReaper)
+	talents := fmt.Sprintf("%d:1", entryReaperClassA)
+	if !strings.Contains(txt, spec) || !strings.Contains(txt, "ASC_LOCAL_RECORDS 1 1") ||
+		!strings.Contains(txt, "ASC_LOCAL_TALENTS") || !strings.Contains(txt, talents) {
+		t.Errorf("E2E_FAIL: state messages after .localtalent = %q, want %q, \"ASC_LOCAL_RECORDS 1 1\" and ASC_LOCAL_TALENTS with %q (#3971)",
+			txt, spec, talents)
+	} else if strings.Contains(txt, fmt.Sprintf("%d:1", entryReaperAutoSpec56)) {
+		t.Errorf("E2E_FAIL: ASC_LOCAL_TALENTS lists automatic entry %d (#3971)", entryReaperAutoSpec56)
+	} else {
+		t.Logf("E2E_PASS: ASC_LOCAL_SPEC/RECORDS/TALENTS carried specialization %d and paid entry %d only",
+			specReaper, entryReaperClassA)
+	}
+}
+
+// TestBuildSurvivesSpecializationSwitch covers the stored builds of server PR #4027 (idea from #4031): a
+// specialization switch writes down the build being left and puts back the build of the specialization being
+// entered — the shared class tree and that specialization's own tree — and the record survives a relog.
+func TestBuildSurvivesSpecializationSwitch(t *testing.T) {
+	const otherSpec = 55
+	bot := newBot(t, "TAut8", e2eharness.RaceOrc, classReaper, 20)
+	bot.SetSpecialization(t, specReaper, spellReaperAutoSpec56)
+	bot.SetTalentRank(t, entryReaperClassA, 1)
+	bot.SetTalentRank(t, entryReaperSpecA, 1)
+	if !waitSpell(bot, spellReaperClassA, 5*time.Second) || !waitSpell(bot, spellReaperSpecA, 5*time.Second) {
+		t.Fatalf("precondition: talents %d/%d not learned in specialization %d", entryReaperClassA, entryReaperSpecA, specReaper)
+	}
+
+	// Leave for another specialization: its tree goes, the class tree comes back from its record.
+	bot.SetSpecialization(t, otherSpec)
+	if !waitSpellGone(bot, spellReaperSpecA, 5*time.Second) {
+		t.Errorf("E2E_FAIL: specialization %d talent spell %d still known after switching to %d (#3971)",
+			specReaper, spellReaperSpecA, otherSpec)
+	}
+	if !waitSpell(bot, spellReaperClassA, 5*time.Second) {
+		t.Errorf("E2E_FAIL: class-tree talent spell %d lost by the switch to %d (#3971)", spellReaperClassA, otherSpec)
+	}
+	bot.SetTalentRank(t, entryReaperSpec55A, 1)
+	if !waitSpell(bot, spellReaperSpec55A, 5*time.Second) {
+		t.Fatalf("precondition: talent %d not learned in specialization %d", entryReaperSpec55A, otherSpec)
+	}
+
+	bot.Relog(t)
+
+	// Back: the first specialization's build returns and the other one's tree goes.
+	bot.SetSpecialization(t, specReaper, spellReaperAutoSpec56)
+	backOK := waitSpell(bot, spellReaperSpecA, 5*time.Second)
+	otherGone := waitSpellGone(bot, spellReaperSpec55A, 5*time.Second)
+	classKept := bot.World.KnowsSpell(spellReaperClassA)
+	if !backOK || !otherGone || !classKept {
+		t.Errorf("E2E_FAIL: after switching back to %d: spec talent %d known=%v, other spec talent %d known=%v, class talent %d known=%v (#3971)",
+			specReaper, spellReaperSpecA, backOK, spellReaperSpec55A, !otherGone, spellReaperClassA, classKept)
+	}
+
+	// And the other specialization's build is waiting too.
+	bot.SetSpecialization(t, otherSpec)
+	if !waitSpell(bot, spellReaperSpec55A, 5*time.Second) || !waitSpellGone(bot, spellReaperSpecA, 5*time.Second) {
+		t.Errorf("E2E_FAIL: switching to %d again did not restore talent %d and drop %d (#3971)",
+			otherSpec, spellReaperSpec55A, spellReaperSpecA)
+	} else if backOK && otherGone && classKept {
+		t.Logf("E2E_PASS: builds of specializations %d and %d followed their switches across a relog; class tree kept",
+			specReaper, otherSpec)
+	}
+}
