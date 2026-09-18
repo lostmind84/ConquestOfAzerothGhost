@@ -5,6 +5,7 @@ package talents_test
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,12 +33,88 @@ const (
 	// the per-shot multiplier read by the server's damage calculation.
 	spellArbalestMastery         uint32 = 706240
 	spellArbalestMasteryProgress uint32 = 706241
+
+	// Normal-path acquisition: CoA local talent entries, resolved from the client DBCs
+	// (CharacterAdvancement.dbc, layout from modules/mod-ascension-compat/src/AscensionCoATalentData.cpp) rather
+	// than a forced `.learn` of the resulting spell ids. Witch Hunter (class 15), Boltslinger spec (tab 39 -> 10).
+	specBoltslinger       uint32 = 10
+	talentWitchbane       uint32 = 31160 // rank 1 -> spell 800165
+	talentArbalestMastery uint32 = 7458  // 1 point
+
+	// Expert's Training Dummy: never fights back, so a level gap against the fixture cannot distort a damage
+	// reading. Used instead of the Defias Thug for the lab-client hand-off (TestArbalestLabSetup).
+	creatureTrainingDummy uint32 = 32666
 )
 
 // witchbaneRanksHighToLow tries the highest rank first and falls back, so the test finds whichever rank a level 60
 // Witch Hunter can actually cast instead of guessing a level gate.
 var witchbaneRanksHighToLow = []uint32{
 	spellWitchbaneRank7, spellWitchbaneRank6, spellWitchbaneRank5, spellWitchbaneRank4, spellWitchbaneRank1,
+}
+
+// gmReplyText captures whatever chat text (SMSG_MESSAGECHAT) the server sends back while cmd runs, for one GM
+// command whose success/failure isn't otherwise observable (unlike a spell cast, which returns a typed result).
+// The text sits inside the raw packet bytes alongside binary header fields, so this is diagnostic only — callers
+// must still verify the actual effect (e.g. KnowsSpell), never parse this string as the source of truth.
+func gmReplyText(t *testing.T, bot *e2eharness.ScenarioBot, cmd string, wait time.Duration) string {
+	t.Helper()
+	ch := make(chan string, 8)
+	cancel := bot.World.AddPacketHook(func(op uint16, data []byte) {
+		if op != smsgMessageChat {
+			return
+		}
+		select {
+		case ch <- string(data):
+		default:
+		}
+	})
+	defer cancel()
+	bot.GM(t, cmd)
+	deadline := time.After(wait)
+	var lines []string
+collect:
+	for {
+		select {
+		case l := <-ch:
+			lines = append(lines, l)
+		case <-deadline:
+			break collect
+		}
+	}
+	return strings.Join(lines, " || ")
+}
+
+// acquireArbalestNormalPath builds Witchbane + Arbalest Mastery the normal way: `.localspec`/`.localtalent`, the
+// SEC_PLAYER commands that go through the server's real talent-selection code
+// (modules/mod-ascension-compat/src/AscensionCompat.cpp, HandleLocalTalentCommand — class/spec/level/rank-count
+// validation, no bypass), instead of a forced `.learn` of the resulting spell ids. Returns the Witchbane spell id
+// the character actually ends up knowing, found by checking every rank id this package knows about via KnowsSpell
+// rather than assumed to be rank 1 just because `.localtalent 31160 1` was asked for. Fails the test with the
+// server's own reply text if nothing was granted — no silent `.learn` fallback.
+func acquireArbalestNormalPath(t *testing.T, bot *e2eharness.ScenarioBot) (witchbaneRank uint32) {
+	t.Helper()
+	bot.SetSpecialization(t, specBoltslinger)
+
+	reply := gmReplyText(t, bot, fmt.Sprintf(".localtalent %d 1", talentWitchbane), settle)
+	t.Logf(".localtalent %d 1 (Witchbane) reply: %q", talentWitchbane, reply)
+	for _, candidate := range witchbaneRanksHighToLow {
+		if waitSpell(bot, candidate, 3*time.Second) {
+			witchbaneRank = candidate
+			break
+		}
+	}
+	if witchbaneRank == 0 {
+		t.Fatalf("E2E_FAIL: .localtalent %d 1 granted no Witchbane rank this package knows about — server reply: %q (#3935)",
+			talentWitchbane, reply)
+	}
+
+	reply = gmReplyText(t, bot, fmt.Sprintf(".localtalent %d 1", talentArbalestMastery), settle)
+	t.Logf(".localtalent %d 1 (Arbalest Mastery) reply: %q", talentArbalestMastery, reply)
+	if !waitSpell(bot, spellArbalestMastery, 3*time.Second) {
+		t.Fatalf("E2E_FAIL: .localtalent %d 1 did not grant Arbalest Mastery (%d) — server reply: %q (#3935)",
+			talentArbalestMastery, spellArbalestMastery, reply)
+	}
+	return witchbaneRank
 }
 
 // backOffFromTarget teleports the bot to ~yards away from the target's *current* position and faces it, then
@@ -230,6 +307,123 @@ func TestWitchHunter_ArbalestMasteryAuraPlacement(t *testing.T) {
 	}
 }
 
+// Same check as TestWitchHunter_ArbalestMasteryAuraPlacement, but built the normal way per the project's own
+// requirement: no forced `.learn` of the Witchbane/Arbalest Mastery spell ids, and no GM cheats beyond what is
+// proven necessary. The character goes through .localspec/.localtalent (see acquireArbalestNormalPath) instead,
+// and the fixture is an Expert's Training Dummy (never fights back) instead of a live Defias Thug. Everything else
+// — crossbow proficiency/equip, range backoff, three casts, the same aura read on both units — is identical to the
+// forced-learn test, so any difference in where the aura lands is attributable to the acquisition path, not to an
+// unrelated setup change.
+//
+//	go test -tags=e2e ./e2e/coa/talents -run ArbalestMasteryAuraPlacement_NormalPath -count=1 -v
+func TestWitchHunter_ArbalestMasteryAuraPlacement_NormalPath(t *testing.T) {
+	bot := newBot(t, "ArbNorm", e2eharness.RaceHuman, classWitchHunter, 60)
+
+	// Weapon proficiency is not one of the two talents named in this task and has no local-talent equivalent given
+	// to reproduce it; TestWitchHunter_BurrowBoltPulls (an existing, already-accepted test for this same class)
+	// uses the identical Learn(proficiency)+equip(weapon) pattern, so it is kept as-is here.
+	bot.Learn(t, spellProficiencyCrossbows)
+	equip(t, bot, itemMakeshiftCrossbow)
+
+	witchbaneRank := acquireArbalestNormalPath(t, bot)
+	t.Logf("normal-path acquisition (.localspec %d, .localtalent %d 1, .localtalent %d 1) granted %s",
+		specBoltslinger, talentWitchbane, talentArbalestMastery, bot.DescribeSpell(witchbaneRank))
+
+	dummy := spawnTarget(t, bot, creatureTrainingDummy, 60)
+	bot.CombatReadyFull(t)
+	dist := backOffFromTarget(t, bot, dummy, 20)
+	t.Logf("distance to target before cast: was %.1f yd, now ~20 yd", dist)
+
+	// Training dummies are faction 7 (neutral) by default. Probe once before assuming a hostile-faction override
+	// is needed, instead of setting it unconditionally.
+	hostileFactionNeeded := false
+	res := castLanded(t, bot, witchbaneRank, dummy, 2)
+	if !res.Success {
+		t.Logf("Witchbane refused against the neutral training dummy (%s); setting it hostile with "+
+			".npc set faction temp 14 and retrying", e2eharness.SpellFailReasonName(res.FailReason))
+		bot.GM(t, ".npc set faction temp 14")
+		time.Sleep(settle)
+		hostileFactionNeeded = true
+		res = castLanded(t, bot, witchbaneRank, dummy, 3)
+		if !res.Success {
+			t.Fatalf("E2E_FAIL: Witchbane (%s) still refused against the dummy after .npc set faction temp 14: %s (#3935)",
+				bot.DescribeSpell(witchbaneRank), e2eharness.SpellFailReasonName(res.FailReason))
+		}
+	}
+	t.Logf("hostile faction override needed for the training dummy: %v", hostileFactionNeeded)
+
+	// Two more casts (three total) so Arbalest Mastery's per-shot stacks have a chance to build and apply.
+	for cast := 2; cast <= 3; cast++ {
+		time.Sleep(3 * time.Second) // let the previous channel finish firing its shots
+		d := backOffFromTarget(t, bot, dummy, 20)
+		t.Logf("distance to target before cast: was %.1f yd, now ~20 yd", d)
+		if res := castLanded(t, bot, witchbaneRank, dummy, 3); !res.Success {
+			t.Fatalf("E2E_FAIL: Witchbane (%s) refused on cast %d/3: %s (#3935)",
+				bot.DescribeSpell(witchbaneRank), cast, e2eharness.SpellFailReasonName(res.FailReason))
+		}
+	}
+	time.Sleep(3 * time.Second) // let the last channel finish before reading auras
+	time.Sleep(settle)
+
+	selfGUID := bot.World.CharGUID()
+	selfAuras := serverAuras(t, bot, selfGUID)
+	enemyAuras := serverAuras(t, bot, dummy)
+	t.Logf("server auras on the Witch Hunter (self, %d): %v", selfGUID, selfAuras)
+	t.Logf("server auras on the target (%d): %v", dummy, enemyAuras)
+	t.Logf("client HasAura on self: mastery(%d)=%v progress(%d)=%v",
+		spellArbalestMastery, bot.HasAura(spellArbalestMastery),
+		spellArbalestMasteryProgress, bot.HasAura(spellArbalestMasteryProgress))
+	t.Logf("client UnitHasAura on target: mastery(%d)=%v progress(%d)=%v",
+		spellArbalestMastery, bot.UnitHasAura(dummy, spellArbalestMastery),
+		spellArbalestMasteryProgress, bot.UnitHasAura(dummy, spellArbalestMasteryProgress))
+
+	if len(selfAuras) == 0 && len(enemyAuras) == 0 {
+		t.Errorf("E2E_FAIL: no aura at all on the Witch Hunter or the target after 3 Witchbane casts (normal-path, #3935)")
+		return
+	}
+
+	for id := range selfAuras {
+		t.Logf("aura %d present on the Witch Hunter (server)", id)
+	}
+	for id := range enemyAuras {
+		t.Logf("aura %d present on the target (server)", id)
+	}
+
+	_, masteryOnBotServer := selfAuras[spellArbalestMastery]
+	_, masteryOnTargetServer := enemyAuras[spellArbalestMastery]
+	masteryOnBot := masteryOnBotServer || bot.HasAura(spellArbalestMastery)
+	masteryOnTarget := masteryOnTargetServer || bot.UnitHasAura(dummy, spellArbalestMastery)
+
+	_, progressOnBotServer := selfAuras[spellArbalestMasteryProgress]
+	_, progressOnTargetServer := enemyAuras[spellArbalestMasteryProgress]
+	progressOnBot := progressOnBotServer || bot.HasAura(spellArbalestMasteryProgress)
+	progressOnTarget := progressOnTargetServer || bot.UnitHasAura(dummy, spellArbalestMasteryProgress)
+
+	if !masteryOnBot && !masteryOnTarget && !progressOnBot && !progressOnTarget {
+		t.Errorf("E2E_FAIL: neither Arbalest Mastery (%d) nor its stacking proc (%d) appeared on the Witch Hunter "+
+			"or the target after 3 Witchbane casts (normal-path, #3935)", spellArbalestMastery, spellArbalestMasteryProgress)
+		return
+	}
+
+	failed := false
+	if masteryOnBot && !masteryOnTarget {
+		t.Errorf("E2E_FAIL: Arbalest Mastery (%d) is on the Witch Hunter, not on the target (normal-path, #3935)", spellArbalestMastery)
+		failed = true
+	} else if masteryOnTarget {
+		t.Logf("E2E_PASS: Arbalest Mastery (%d) is on the target", spellArbalestMastery)
+	}
+	if progressOnBot && !progressOnTarget {
+		t.Errorf("E2E_FAIL: Arbalest Mastery Progress (%d), the stacking aura that carries the per-shot damage "+
+			"bonus, is on the Witch Hunter, not on the target (normal-path, #3935)", spellArbalestMasteryProgress)
+		failed = true
+	} else if progressOnTarget {
+		t.Logf("E2E_PASS: Arbalest Mastery Progress (%d) is on the target", spellArbalestMasteryProgress)
+	}
+	if !failed {
+		t.Logf("E2E_PASS: no Arbalest Mastery aura landed on the Witch Hunter instead of the target (normal-path)")
+	}
+}
+
 // labAccount/labPassword/labChar are the fixed identity coa-client-lab logs into to look at #3935 directly. Unlike
 // newBot's random-prefixed throwaway accounts, this one must be stable across runs and must not be torn down by
 // t.Cleanup, since the real client logs in well after this Go process exits.
@@ -366,26 +560,20 @@ func TestArbalestLabSetup(t *testing.T) {
 	e2eharness.EnableGM(t, bot.World)
 	e2eharness.SetLevel(t, bot.World, labLevel) // logs "level set to N" itself
 
-	// Same setup TestWitchHunter_ArbalestMasteryAuraPlacement proved works. No explicit spec selection was needed
-	// there (Arbalest Mastery is a base passive, not talent-gated), so none is done here either.
+	// Normal path, not forced `.learn`: .localspec/.localtalent, verified by TestWitchHunter_ArbalestMasteryAuraPlacement_NormalPath
+	// to grant a real, castable Witchbane rank at level 60 with no talent-point shortfall (its own reply was
+	// "Restored 6 Ascension class abilities.", not a missing-points error). Weapon proficiency is not one of the
+	// two talents named for this task and has no local-talent equivalent, so it is kept as a `.learn` — see that
+	// same sibling test's comment for why this one exception is kept.
 	bot.Learn(t, spellProficiencyCrossbows)
 	if _, equipped := bot.EquippedSlot(itemMakeshiftCrossbow); !equipped {
 		equip(t, bot, itemMakeshiftCrossbow)
 	} else {
 		t.Logf("Makeshift Crossbow (%d) already equipped, skipping .additem", itemMakeshiftCrossbow)
 	}
-	if !bot.World.KnowsSpell(spellArbalestMastery) {
-		bot.Learn(t, spellArbalestMastery)
-	}
-	for _, r := range witchbaneRanksHighToLow {
-		bot.Learn(t, r)
-	}
-	// TestWitchHunter_ArbalestMasteryAuraPlacement already proved, twice, that a level 60 Witch Hunter set up this
-	// way can cast Rank 7 (574320) — the highest rank — successfully. This test does not cast (the lab client
-	// does), so it reports that proven rank instead of re-discovering it here.
-	const provenRank = spellWitchbaneRank7
-	t.Logf("Witchbane rank to cast (proven castable at level %d by the sibling test): %s",
-		labLevel, bot.DescribeSpell(provenRank))
+	witchbaneRank := acquireArbalestNormalPath(t, bot)
+	t.Logf("Witchbane rank to cast (granted by .localtalent %d 1 at level %d): %s",
+		talentWitchbane, labLevel, bot.DescribeSpell(witchbaneRank))
 
 	worldDB, err := e2eharness.OpenWorldDB()
 	if err != nil {
@@ -393,24 +581,37 @@ func TestArbalestLabSetup(t *testing.T) {
 	}
 	defer worldDB.Close()
 	var creatureName string
-	if err := worldDB.QueryRow(`SELECT name FROM creature_template WHERE entry = ?`, creatureDefiasThug).
+	if err := worldDB.QueryRow(`SELECT name FROM creature_template WHERE entry = ?`, creatureTrainingDummy).
 		Scan(&creatureName); err != nil {
-		t.Fatalf("creature_template name for entry %d: %v", creatureDefiasThug, err)
+		t.Fatalf("creature_template name for entry %d: %v", creatureTrainingDummy, err)
 	}
 
 	// Persistent (`.npc add`), not the auto-despawned fixture the other test uses: this target must still be there
 	// when the lab client logs in later. The bot has not moved since the anchor .go xyz above, so the creature
-	// spawns on the same proven ground. Same level and neutral faction as the proven setup.
-	thug, spawnID := spawnPersistentNoCleanup(t, bot, creatureDefiasThug, 15*time.Second)
+	// spawns on the same proven ground. An Expert's Training Dummy, not the Defias Thug the placement tests use:
+	// it never fights back, so a level gap cannot distort anything, and TestWitchHunter_ArbalestMasteryAuraPlacement_NormalPath
+	// already confirmed Witchbane lands on a level 60 dummy at its default (neutral, faction 7) template faction
+	// with no `.npc set faction temp 14` override needed — so none is applied here either.
+	dummy, spawnID := spawnPersistentNoCleanup(t, bot, creatureTrainingDummy, 15*time.Second)
 	bot.GM(t, fmt.Sprintf(".npc set level %d", labLevel))
-	bot.GM(t, ".npc set faction 7")
 
-	// Leave the character ~15 yd from the target using only ground-snapped positions (see groundSnapBackOff) — the
+	// Leave the character ~20 yd from the target using only ground-snapped positions (see groundSnapBackOff) — the
 	// naive Teleport()-with-reused-Z approach the other test uses is exactly what put the character over open air
 	// last time. Melee range itself refuses Witchbane with SPELL_FAILED_TOO_CLOSE (see
 	// TestWitchHunter_ArbalestMasteryAuraPlacement's history), so the character cannot just stay at the anchor.
-	dist, zDelta := groundSnapBackOff(t, bot, thug, 15)
+	dist, zDelta := groundSnapBackOff(t, bot, dummy, 20)
 	t.Logf("distance to target: %.1f yd, height difference from target: %.1f yd", dist, zDelta)
+
+	// Exact dummy position/orientation, for `.go xyz X Y Z MAP O` (the 5th number is orientation) to place a
+	// client character at the same spot facing it. The client's own tracked orientation (bot.World.Position(),
+	// set locally by Face()/SetFacing inside groundSnapBackOff) is used, not the object cache's Orientation field
+	// — that field only refreshes from a server broadcast about movement and read back immediately after Face()
+	// once still showed the pre-Face value.
+	var dummyX, dummyY, dummyZ float32
+	if obj := bot.World.GetObject(dummy); obj != nil {
+		dummyX, dummyY, dummyZ = obj.InterpolatedPosition()
+	}
+	_, _, _, charOrientation, _ := bot.World.Position()
 
 	bot.GM(t, ".gm off") // leave the character in a normal (non-GM-mode) state for the client to pick up
 	bot.GM(t, ".combatstop")
@@ -456,9 +657,12 @@ func TestArbalestLabSetup(t *testing.T) {
 	t.Logf("E2E_PASS: labarba setup ready for the client")
 	t.Logf("account: %s", labAccount)
 	t.Logf("character: %s", charName)
-	t.Logf("creature: %s (entry %d, live guid 0x%X, db spawn id %d)", creatureName, creatureDefiasThug, thug, spawnID)
-	t.Logf("Witchbane rank to cast: %s", bot.DescribeSpell(provenRank))
-	t.Logf("character position: x=%.1f y=%.1f z=%.1f map=%d, health=%d/%d", x2, y2, z2, mapID, hp, maxHP)
+	t.Logf("creature: %s (entry %d, live guid 0x%X, db spawn id %d)", creatureName, creatureTrainingDummy, dummy, spawnID)
+	t.Logf("creature position: x=%.1f y=%.1f z=%.1f map=%d", dummyX, dummyY, dummyZ, mapID)
+	t.Logf("Witchbane rank to cast: %s", bot.DescribeSpell(witchbaneRank))
+	t.Logf("character position: x=%.1f y=%.1f z=%.1f map=%d orientation=%.4f, health=%d/%d",
+		x2, y2, z2, mapID, charOrientation, hp, maxHP)
+	t.Logf("client hint: .go xyz %.2f %.2f %.2f %d %.4f", x2, y2, z2, mapID, charOrientation)
 
 	// Graceful logout (CMSG_LOGOUT_REQUEST), not a raw socket close, so the account is not left "online" and
 	// refuses the lab client's login right after.
