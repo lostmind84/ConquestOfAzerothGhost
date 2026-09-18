@@ -560,3 +560,27 @@ func TestKnownEntriesUploadSelectsOneSpecialization(t *testing.T) {
 		t.Logf("E2E_PASS: two-specialization upload refused (%q); single-specialization upload selected 55", txt)
 	}
 }
+
+// TestTalentBridgeMessageIsSent covers the ASC_LOCAL_CAD bridge (server PR #4027, format from #4030): after a
+// talent change the server whispers the character its active specialization and its held entry ranks on the
+// addon channel, so the patch-B local layer can trust the server instead of its SavedVariable and spellbook.
+// captureChatDuring replaces the tab after the prefix with a space.
+func TestTalentBridgeMessageIsSent(t *testing.T) {
+	bot := newBot(t, "TAut7", e2eharness.RaceOrc, classReaper, 12)
+	bot.SetSpecialization(t, specReaper, spellReaperAutoSpec56)
+
+	txt := captureChatDuring(t, bot, func() { bot.SetTalentRank(t, entryReaperClassA, 1) })
+	if !waitSpell(bot, spellReaperClassA, 5*time.Second) {
+		t.Fatalf("precondition: .localtalent %d 1 did not grant spell %d", entryReaperClassA, spellReaperClassA)
+	}
+	header := fmt.Sprintf("ASC_LOCAL_CAD 1:%d:1:1:", specReaper)
+	paid := fmt.Sprintf("%d,1", entryReaperClassA)
+	automatic := fmt.Sprintf("%d,1", entryReaperAutoSpec56)
+	if !strings.Contains(txt, header) || !strings.Contains(txt, paid) || !strings.Contains(txt, automatic) {
+		t.Errorf("E2E_FAIL: bridge message after .localtalent = %q, want %q with %q and %q (#3971)", txt, header,
+			paid, automatic)
+	} else {
+		t.Logf("E2E_PASS: ASC_LOCAL_CAD carried specialization %d, paid entry %d and automatic entry %d",
+			specReaper, entryReaperClassA, entryReaperAutoSpec56)
+	}
+}
