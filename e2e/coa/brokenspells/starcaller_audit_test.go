@@ -221,30 +221,35 @@ func TestStarcaller_ScatteredStarsConsumeOnCorpse(t *testing.T) {
 	bot.Damage(t, alive, 1_000_000) // clear the first target before the second
 
 	dying := spawnTarget(t, bot, creatureHostileGolem, 80)
-	for i := 0; i < 5 && bot.UnitAuraStacks(dying, auraScatteredStars) == 0; i++ {
-		castLanded(t, bot, spellFanOfKnivesR1, dying, 2)
-		time.Sleep(settle)
-	}
-	if bot.UnitAuraStacks(dying, auraScatteredStars) == 0 {
-		t.Fatalf("precondition: Fan of Knives never applied Scattered Stars to the second target")
-	}
-	hp, _ := bot.UnitHP(dying)
-	if hp > 1 {
-		bot.Damage(t, dying, hp-1)
-	}
-	mana.reset()
+	// A Lance can miss and leave the target alive (the consume still runs), so retry whole rounds: cooldowns
+	// reset, star present, health cut to 1, Lance, and only a round that ends with a corpse counts.
 	var got uint32
-	for i := 0; i < 3 && got == 0; i++ {
+	dead := false
+	for round := 1; round <= 4 && !dead; round++ {
+		_ = bot.World.SetTarget(bot.World.CharGUID()) // .cooldown applies to the selection
+		bot.GM(t, ".cooldown")
+		_ = bot.World.SetTarget(dying)
+		for i := 0; i < 5 && bot.UnitAuraStacks(dying, auraScatteredStars) == 0; i++ {
+			castLanded(t, bot, spellFanOfKnivesR1, dying, 2)
+			time.Sleep(settle)
+		}
+		if bot.UnitAuraStacks(dying, auraScatteredStars) == 0 {
+			t.Fatalf("precondition: Fan of Knives never applied Scattered Stars to the second target")
+		}
+		if hp, _ := bot.UnitHP(dying); hp > 1 {
+			bot.Damage(t, dying, hp-1)
+		}
+		mana.reset()
 		castLanded(t, bot, spellLunarLance, dying, 3)
 		time.Sleep(4 * time.Second)
 		got, _ = mana.total()
+		obj := bot.World.GetObject(dying)
+		dead = obj != nil && !obj.IsAlive()
+		_, events := mana.total()
+		t.Logf("corpse round %d: target dead=%v, energize events %+v", round, dead, events)
 	}
-	obj := bot.World.GetObject(dying)
-	dead := obj != nil && !obj.IsAlive()
-	events := func() []manaGainEvent { _, e := mana.total(); return e }()
-	t.Logf("corpse case: target dead=%v, energize events %+v", dead, events)
 	if !dead {
-		t.Fatalf("precondition: the Lance did not kill the target")
+		t.Fatalf("precondition: no Lance killed the target in 4 rounds")
 	}
 	if got == 0 {
 		t.Errorf("E2E_FAIL: consume on a corpse returned no mana, living target returned %d (#4224)", control)
