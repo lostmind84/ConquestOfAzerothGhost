@@ -232,16 +232,56 @@ func TestStarcaller_ScatteredStarsConsumeOnCorpse(t *testing.T) {
 	t.Logf("E2E_PASS: consume on a corpse energized %d mana (living target %d)", got, control)
 }
 
-// dist2D is the horizontal distance between the bot and a creature, from the creature's interpolated
-// position (a knockback reaches the client as a movement spline).
-func dist2D(bot *e2eharness.ScenarioBot, guid uint64) (float32, bool) {
-	obj := bot.World.GetObject(guid)
-	if obj == nil || !obj.HasKnownPosition() {
-		return 0, false
+const (
+	smsgMonsterMoveOpcode uint16 = 0x00DD
+	splineFlagParabolic   uint32 = 0x00000800
+	splineFlagAnimation   uint32 = 0x00400000
+)
+
+// jumpDestination reads the destination of a parabolic SMSG_MONSTER_MOVE after the mover GUID. The harness
+// position cache does not follow parabolic splines (it parses their destination as 0,0), so the knockback end
+// point is read from the packet, as e2e/coa/talents does for Burrow Bolt.
+func jumpDestination(r *bytes.Reader) ([3]float32, bool) {
+	var head struct {
+		Unk      uint8
+		Start    [3]float32
+		SplineID uint32
+		Type     uint8
 	}
-	bx, by, _, _ := bot.Pos()
-	ox, oy, _ := obj.InterpolatedPosition()
-	return e2eharness.Distance3D(bx, by, 0, ox, oy, 0), true
+	if binary.Read(r, binary.LittleEndian, &head) != nil || head.Type != 0 {
+		return [3]float32{}, false
+	}
+	var flags, duration uint32
+	if binary.Read(r, binary.LittleEndian, &flags) != nil || flags&splineFlagParabolic == 0 {
+		return [3]float32{}, false
+	}
+	if flags&splineFlagAnimation != 0 {
+		var anim struct {
+			ID    uint8
+			Start uint32
+		}
+		if binary.Read(r, binary.LittleEndian, &anim) != nil {
+			return [3]float32{}, false
+		}
+	}
+	var parabolic struct {
+		Speed float32
+		Start uint32
+	}
+	var count uint32
+	var dest [3]float32
+	if binary.Read(r, binary.LittleEndian, &duration) != nil ||
+		binary.Read(r, binary.LittleEndian, &parabolic) != nil ||
+		binary.Read(r, binary.LittleEndian, &count) != nil || count != 1 ||
+		binary.Read(r, binary.LittleEndian, &dest) != nil {
+		return [3]float32{}, false
+	}
+	return dest, true
+}
+
+type knockJump struct {
+	at   time.Time
+	dest [3]float32
 }
 
 // Main project issue #4013: Stellar Drift slows nearby enemies, then knocks them back after 3 seconds. The
@@ -260,25 +300,48 @@ func TestStarcaller_StellarDriftKnocksBackAfterSlow(t *testing.T) {
 	// Hostile (faction 14) creature: training dummies are neutral and are not Stellar Drift targets.
 	golem := spawnTarget(t, bot, creatureHostileGolem, 80)
 	time.Sleep(settle)
-	before, ok := dist2D(bot, golem)
-	if !ok {
+	obj := bot.World.GetObject(golem)
+	if obj == nil || !obj.HasKnownPosition() {
 		t.Fatalf("precondition: no position for the creature")
 	}
+	bx, by, _, _ := bot.Pos()
+	dist := func(x, y float32) float32 { return e2eharness.Distance3D(bx, by, 0, x, y, 0) }
+	before := dist(obj.PosX, obj.PosY)
 	t.Logf("creature %.1f yd away before the cast", before)
 
+	var mu sync.Mutex
+	var jumps []knockJump
+	cancelMoves := bot.World.AddPacketHook(func(op uint16, data []byte) {
+		if op != smsgMonsterMoveOpcode {
+			return
+		}
+		r := bytes.NewReader(data)
+		if readPackedGUID(r) != golem {
+			return
+		}
+		if dest, ok := jumpDestination(r); ok {
+			mu.Lock()
+			jumps = append(jumps, knockJump{time.Now(), dest})
+			mu.Unlock()
+		}
+	})
+	defer cancelMoves()
+
 	var res e2eharness.SpellCastResult
+	var slowSeen time.Time
 	for attempt := 1; attempt <= 3; attempt++ {
 		res = castLanded(t, bot, spellStellarDrift, 0, 2)
 		if !res.Success {
 			t.Fatalf("Stellar Drift refused: %s", e2eharness.SpellFailReasonName(res.FailReason))
 		}
 		start := time.Now()
-		slowed := false
-		for time.Since(start) < 1500*time.Millisecond && !slowed {
-			slowed = bot.UnitHasAura(golem, auraStellarSlow)
+		for time.Since(start) < 1500*time.Millisecond && slowSeen.IsZero() {
+			if bot.UnitHasAura(golem, auraStellarSlow) {
+				slowSeen = time.Now()
+			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		if slowed {
+		if !slowSeen.IsZero() {
 			break
 		}
 		t.Logf("attempt %d: no slow on the creature (miss?)", attempt)
@@ -286,28 +349,35 @@ func TestStarcaller_StellarDriftKnocksBackAfterSlow(t *testing.T) {
 		_ = bot.World.SetTarget(bot.World.CharGUID()) // .cooldown applies to the selection
 		bot.GM(t, ".cooldown")
 	}
-	if !bot.UnitHasAura(golem, auraStellarSlow) {
+	if slowSeen.IsZero() {
 		t.Fatalf("precondition: Stellar Drift never slowed the creature")
 	}
 
-	castAt := time.Now()
-	var maxAway float32
-	var atOneSecond float32
-	for time.Since(castAt) < 7*time.Second {
-		if d, ok := dist2D(bot, golem); ok {
-			if d > maxAway {
-				maxAway = d
-			}
-			if atOneSecond == 0 && time.Since(castAt) >= time.Second {
-				atOneSecond = d
-			}
+	// The knockback comes 3 s after the slow; wait for the jump packet, then let the creature settle.
+	deadline := time.Now().Add(7 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(jumps)
+		mu.Unlock()
+		if n > 0 {
+			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Logf("E2E_MEASURE: distance %.1f yd before, %.1f yd one second after the slow, %.1f yd at most within 7 s", before, atOneSecond, maxAway)
-	if maxAway-before < 15 {
-		t.Errorf("E2E_FAIL: creature moved at most %.1f yd away after Stellar Drift, want at least 15 (#4013)", maxAway-before)
+	mu.Lock()
+	got := append([]knockJump(nil), jumps...)
+	mu.Unlock()
+	if len(got) == 0 {
+		t.Errorf("E2E_FAIL: no knockback spline sent for the slowed creature within 7 s (#4013)")
 		return
 	}
-	t.Logf("E2E_PASS: Stellar Drift knocked the creature back %.1f yd", maxAway-before)
+	first := got[0]
+	after := dist(first.dest[0], first.dest[1])
+	t.Logf("E2E_MEASURE: slow seen, knockback spline %.1f s later, %.1f yd -> %.1f yd from the caster",
+		first.at.Sub(slowSeen).Seconds(), before, after)
+	if after-before < 15 {
+		t.Errorf("E2E_FAIL: knockback moves the creature %.1f yd away, want at least 15 (#4013)", after-before)
+		return
+	}
+	t.Logf("E2E_PASS: Stellar Drift knocked the creature back %.1f yd", after-before)
 }
