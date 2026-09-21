@@ -229,3 +229,83 @@ func TestStarcaller_ScatteredStarsConsumeOnCorpse(t *testing.T) {
 	}
 	t.Logf("E2E_PASS: consume on a corpse energized %d mana (living target %d)", got, control)
 }
+
+// dist2D is the horizontal distance between the bot and a creature, from the creature's interpolated
+// position (a knockback reaches the client as a movement spline).
+func dist2D(bot *e2eharness.ScenarioBot, guid uint64) (float32, bool) {
+	obj := bot.World.GetObject(guid)
+	if obj == nil || !obj.HasKnownPosition() {
+		return 0, false
+	}
+	bx, by, _, _ := bot.Pos()
+	ox, oy, _ := obj.InterpolatedPosition()
+	return e2eharness.Distance3D(bx, by, 0, ox, oy, 0), true
+}
+
+// Main project issue #4013: Stellar Drift slows nearby enemies, then knocks them back after 3 seconds. The
+// reporter says the knockback never happens. Expected: the creature carries the slow 802773, is not moved
+// while the slow runs, and ends up at least 15 yards further away (the native arc is about 25 yd).
+// Server-side proof: scenario starcaller-stellar-drift-knockback.
+//
+//	go test -tags=e2e -p 1 ./e2e/coa/brokenspells -run StellarDriftKnockback -count=1 -v
+func TestStarcaller_StellarDriftKnocksBackAfterSlow(t *testing.T) {
+	const (
+		spellStellarDrift uint32 = 800501
+		auraStellarSlow   uint32 = 802773
+	)
+	bot := starcallerLevel80(t, "ScDrft")
+	bot.Learn(t, spellStellarDrift)
+	// Hostile (faction 14) creature: training dummies are neutral and are not Stellar Drift targets.
+	golem := spawnTarget(t, bot, creatureHostileGolem, 80)
+	time.Sleep(settle)
+	before, ok := dist2D(bot, golem)
+	if !ok {
+		t.Fatalf("precondition: no position for the creature")
+	}
+	t.Logf("creature %.1f yd away before the cast", before)
+
+	var res e2eharness.SpellCastResult
+	for attempt := 1; attempt <= 3; attempt++ {
+		res = castLanded(t, bot, spellStellarDrift, 0, 2)
+		if !res.Success {
+			t.Fatalf("Stellar Drift refused: %s", e2eharness.SpellFailReasonName(res.FailReason))
+		}
+		start := time.Now()
+		slowed := false
+		for time.Since(start) < 1500*time.Millisecond && !slowed {
+			slowed = bot.UnitHasAura(golem, auraStellarSlow)
+			time.Sleep(100 * time.Millisecond)
+		}
+		if slowed {
+			break
+		}
+		t.Logf("attempt %d: no slow on the creature (miss?)", attempt)
+		time.Sleep(6 * time.Second)
+		_ = bot.World.SetTarget(bot.World.CharGUID()) // .cooldown applies to the selection
+		bot.GM(t, ".cooldown")
+	}
+	if !bot.UnitHasAura(golem, auraStellarSlow) {
+		t.Fatalf("precondition: Stellar Drift never slowed the creature")
+	}
+
+	castAt := time.Now()
+	var maxAway float32
+	var atOneSecond float32
+	for time.Since(castAt) < 7*time.Second {
+		if d, ok := dist2D(bot, golem); ok {
+			if d > maxAway {
+				maxAway = d
+			}
+			if atOneSecond == 0 && time.Since(castAt) >= time.Second {
+				atOneSecond = d
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Logf("E2E_MEASURE: distance %.1f yd before, %.1f yd one second after the slow, %.1f yd at most within 7 s", before, atOneSecond, maxAway)
+	if maxAway-before < 15 {
+		t.Errorf("E2E_FAIL: creature moved at most %.1f yd away after Stellar Drift, want at least 15 (#4013)", maxAway-before)
+		return
+	}
+	t.Logf("E2E_PASS: Stellar Drift knocked the creature back %.1f yd", maxAway-before)
+}
