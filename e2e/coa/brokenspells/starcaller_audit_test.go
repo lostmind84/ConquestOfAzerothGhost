@@ -30,7 +30,28 @@ func starcallerLevel80(t *testing.T, prefix string) *e2eharness.ScenarioBot {
 	t.Helper()
 	bot := newBot(t, prefix, e2eharness.RaceNightElf, classStarcaller, 80)
 	bot.CombatReady(t)
+	t.Cleanup(func() { eraseOwnCharacter(t, bot) })
 	return bot
+}
+
+// eraseOwnCharacter logs the bot out and deletes its character with CMSG_CHAR_DELETE, so the throwaway
+// character does not stay on the server. It registers before the session close, hence runs first.
+func eraseOwnCharacter(t *testing.T, bot *e2eharness.ScenarioBot) {
+	guid := bot.World.CharGUID()
+	if err := bot.World.SendLogout(); err != nil {
+		t.Logf("cleanup: logout: %v", err)
+		return
+	}
+	if err := bot.World.WaitForLogout(30 * time.Second); err != nil {
+		t.Logf("cleanup: no logout completion: %v", err)
+		return
+	}
+	if err := bot.World.DeleteCharacter(guid); err != nil {
+		t.Logf("cleanup: delete: %v", err)
+		return
+	}
+	time.Sleep(time.Second) // the server handles CMSG_CHAR_DELETE asynchronously
+	t.Logf("cleanup: character %#x deleted", guid)
 }
 
 // setLunarPhase leaves the bot with exactly n Lunar Phase stacks and the 4-stack marker.
