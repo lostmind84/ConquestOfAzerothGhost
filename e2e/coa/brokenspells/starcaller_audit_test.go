@@ -3,6 +3,9 @@
 package brokenspells_test
 
 import (
+	"bytes"
+	"encoding/binary"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +18,10 @@ const (
 	auraLunarPhaseStacks     uint32 = 802985
 	auraLunarPhaseMarker     uint32 = 704519 // 4-stack marker applied by the module
 	creatureHostileGolem     uint32 = 36     // harness default hostile creature (faction 14)
+	spellFanOfKnivesR1       uint32 = 680703 // applies one Scattered Stars
+	spellLunarLance          uint32 = 801132 // trigger 572315 starts the Scattered Stars consume
+
+	powerMana uint32 = 0 // smsgSpellEnergizeLog (0x0151) is declared in pyromancer_generated_test.go
 )
 
 // starcallerLevel80 creates a level 80 Starcaller with GM mode off and god on, as the scenario harness does.
@@ -91,4 +98,134 @@ func TestStarcaller_LunarEclipseFourStacksWithBrightMoon(t *testing.T) {
 	} else {
 		t.Logf("E2E_PASS: 8-stack Eclipse left %d stacks", after)
 	}
+}
+
+// manaGainLog collects the mana the bot gains from SMSG_SPELLENERGIZELOG (spell effects, not regeneration).
+type manaGainLog struct {
+	mu     sync.Mutex
+	events []manaGainEvent
+}
+
+type manaGainEvent struct {
+	spellID uint32
+	amount  uint32
+}
+
+func watchManaEnergize(t *testing.T, bot *e2eharness.ScenarioBot) *manaGainLog {
+	t.Helper()
+	log := &manaGainLog{}
+	self := bot.World.CharGUID()
+	cancel := bot.World.AddPacketHook(func(opcode uint16, data []byte) {
+		if opcode != smsgSpellEnergizeLog {
+			return
+		}
+		r := bytes.NewReader(data)
+		if readPackedGUID(r) != self {
+			return
+		}
+		readPackedGUID(r) // caster
+		var body struct {
+			SpellID uint32
+			Power   uint32
+			Amount  uint32
+		}
+		if binary.Read(r, binary.LittleEndian, &body) != nil || body.Power != powerMana {
+			return
+		}
+		log.mu.Lock()
+		log.events = append(log.events, manaGainEvent{body.SpellID, body.Amount})
+		log.mu.Unlock()
+	})
+	t.Cleanup(cancel)
+	return log
+}
+
+func (l *manaGainLog) total() (sum uint32, events []manaGainEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.events {
+		sum += e.amount
+	}
+	return sum, append([]manaGainEvent(nil), l.events...)
+}
+
+func (l *manaGainLog) reset() {
+	l.mu.Lock()
+	l.events = nil
+	l.mu.Unlock()
+}
+
+// consumeStar applies one Scattered Stars stack with Fan of Knives on target (retrying misses), then casts
+// Lunar Lance until the consume returned mana or the attempts run out. It returns the mana energized.
+func consumeStar(t *testing.T, bot *e2eharness.ScenarioBot, mana *manaGainLog, target uint64, lanceAttempts int) uint32 {
+	t.Helper()
+	for i := 0; i < 5 && bot.UnitAuraStacks(target, auraScatteredStars) == 0; i++ {
+		castLanded(t, bot, spellFanOfKnivesR1, target, 2)
+		time.Sleep(settle)
+	}
+	if bot.UnitAuraStacks(target, auraScatteredStars) == 0 {
+		t.Fatalf("precondition: Fan of Knives never applied Scattered Stars")
+	}
+	mana.reset()
+	for i := 0; i < lanceAttempts; i++ {
+		castLanded(t, bot, spellLunarLance, target, 3)
+		time.Sleep(4 * time.Second) // the consumer ticks every 500 ms
+		if sum, _ := mana.total(); sum > 0 {
+			return sum
+		}
+	}
+	return 0
+}
+
+// Main project issue #4224: a Scattered Stars consumer that kills its target left the stars unconsumed and
+// returned no mana. Expected: the Lance that kills a target holding a star still triggers the consume
+// (SMSG_SPELLENERGIZELOG to the bot), as it does on a living target (the control, which makes a red result
+// interpretable). Server-side proof: scenario starcaller-scattered-stars-corpse (mana ratio >= 0.8).
+//
+//	go test -tags=e2e -p 1 ./e2e/coa/brokenspells -run ScatteredStarsCorpse -count=1 -v
+func TestStarcaller_ScatteredStarsConsumeOnCorpse(t *testing.T) {
+	bot := starcallerLevel80(t, "ScCrp")
+	bot.Learn(t, spellFanOfKnivesR1)
+	bot.Learn(t, spellLunarLance)
+	mana := watchManaEnergize(t, bot)
+
+	alive := spawnTarget(t, bot, creatureHostileGolem, 80)
+	control := consumeStar(t, bot, mana, alive, 2)
+	if control == 0 {
+		t.Fatalf("precondition: consume on a living target returned no mana (energize events: none), test not interpretable")
+	}
+	t.Logf("control: consume on a living target energized %d mana", control)
+	bot.Damage(t, alive, 1_000_000) // clear the first target before the second
+
+	dying := spawnTarget(t, bot, creatureHostileGolem, 80)
+	for i := 0; i < 5 && bot.UnitAuraStacks(dying, auraScatteredStars) == 0; i++ {
+		castLanded(t, bot, spellFanOfKnivesR1, dying, 2)
+		time.Sleep(settle)
+	}
+	if bot.UnitAuraStacks(dying, auraScatteredStars) == 0 {
+		t.Fatalf("precondition: Fan of Knives never applied Scattered Stars to the second target")
+	}
+	hp, _ := bot.UnitHP(dying)
+	if hp > 1 {
+		bot.Damage(t, dying, hp-1)
+	}
+	mana.reset()
+	var got uint32
+	for i := 0; i < 3 && got == 0; i++ {
+		castLanded(t, bot, spellLunarLance, dying, 3)
+		time.Sleep(4 * time.Second)
+		got, _ = mana.total()
+	}
+	obj := bot.World.GetObject(dying)
+	dead := obj != nil && !obj.IsAlive()
+	events := func() []manaGainEvent { _, e := mana.total(); return e }()
+	t.Logf("corpse case: target dead=%v, energize events %+v", dead, events)
+	if !dead {
+		t.Fatalf("precondition: the Lance did not kill the target")
+	}
+	if got == 0 {
+		t.Errorf("E2E_FAIL: consume on a corpse returned no mana, living target returned %d (#4224)", control)
+		return
+	}
+	t.Logf("E2E_PASS: consume on a corpse energized %d mana (living target %d)", got, control)
 }
