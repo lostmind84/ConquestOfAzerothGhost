@@ -5,6 +5,7 @@ package brokenspells_test
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -35,10 +36,11 @@ func starcallerLevel80(t *testing.T, prefix string) *e2eharness.ScenarioBot {
 // setLunarPhase leaves the bot with exactly n Lunar Phase stacks and the 4-stack marker.
 func setLunarPhase(t *testing.T, bot *e2eharness.ScenarioBot, n int) {
 	t.Helper()
-	bot.CancelAura(t, auraLunarPhaseStacks)
+	bot.GM(t, fmt.Sprintf(".unaura %d", auraLunarPhaseStacks))
 	bot.WaitAuraGone(t, auraLunarPhaseStacks, 2*time.Second)
 	for i := 0; i < 2*n && bot.AuraStacks(auraLunarPhaseStacks) < n; i++ {
 		bot.ApplyAura(t, auraLunarPhaseStacks)
+		time.Sleep(300 * time.Millisecond) // let the aura update reach the client before reading the count
 	}
 	if got := bot.AuraStacks(auraLunarPhaseStacks); got < n {
 		t.Fatalf("precondition: could not reach %d Lunar Phase stacks, have %d", n, got)
@@ -79,7 +81,7 @@ func TestStarcaller_LunarEclipseFourStacksWithBrightMoon(t *testing.T) {
 	}
 
 	// Eight stacks: only four are spent.
-	bot.CancelAura(t, spellLunarEclipseAbility)
+	bot.GM(t, fmt.Sprintf(".unaura %d", spellLunarEclipseAbility)) // the Eclipse buff is not client-cancellable
 	bot.WaitAuraGone(t, spellLunarEclipseAbility, 2*time.Second)
 	bot.GM(t, ".cooldown") // the bot is its own selection after ApplyAura
 	time.Sleep(gcd)
