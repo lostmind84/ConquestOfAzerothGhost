@@ -277,12 +277,29 @@ func ProbeWorldAlive(t *testing.T, probe *ScenarioBot, issue int) {
 		}
 		HarnessFailf(t, "probe session not alive")
 	}
-	// Soft GM ping — failure may mean crash mid-command.
+	response := make(chan struct{}, 1)
+	cancel := probe.World.AddPacketHook(func(opcode uint16, _ []byte) {
+		if opcode == client.SmsgMessageChat {
+			select {
+			case response <- struct{}{}:
+			default:
+			}
+		}
+	})
+	defer cancel()
 	if err := probe.World.SendGMCommand(".gm on"); err != nil {
 		if issue > 0 {
 			ConfirmedBugf(t, issue, "probe GM command failed (session dead?): %v", err)
 		}
 		HarnessFailf(t, "probe GM command failed: %v", err)
 	}
-	t.Logf("probe world alive (session ok)")
+	select {
+	case <-response:
+		t.Logf("probe world alive (GM response received)")
+	case <-time.After(5 * time.Second):
+		if issue > 0 {
+			ConfirmedBugf(t, issue, "probe received no GM response within 5 s")
+		}
+		HarnessFailf(t, "probe received no GM response within 5 s")
+	}
 }

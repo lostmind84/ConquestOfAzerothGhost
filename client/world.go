@@ -1687,6 +1687,13 @@ func (w *WorldClient) sendPacket(opcode uint16, data []byte) error {
 	return err
 }
 
+// SendRawPacket sends an arbitrary opcode with a caller-supplied payload, framed and
+// encrypted like any other client packet. It exists for protocol-robustness tests that
+// deliberately send malformed or truncated bodies; ordinary flows use the typed helpers.
+func (w *WorldClient) SendRawPacket(opcode uint16, data []byte) error {
+	return w.sendPacket(opcode, data)
+}
+
 func (w *WorldClient) handlePacket(opcode uint16, data []byte) {
 	// Multi-subscriber hooks + legacy OnPacket (see hooks.go / AddPacketHook).
 	w.invokePacketHooks(opcode, data)
