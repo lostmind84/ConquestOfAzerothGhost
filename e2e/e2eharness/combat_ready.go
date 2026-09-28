@@ -287,7 +287,7 @@ func ProbeWorldAlive(t *testing.T, probe *ScenarioBot, issue int) {
 		}
 	})
 	defer cancel()
-	if err := probe.World.SendGMCommand(".gm on"); err != nil {
+	if err := probe.World.SendGMCommand(".server info"); err != nil {
 		if issue > 0 {
 			ConfirmedBugf(t, issue, "probe GM command failed (session dead?): %v", err)
 		}
